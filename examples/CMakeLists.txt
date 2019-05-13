@@ -55,14 +55,26 @@ target_link_libraries(fr2en
                         Support
                         LLVMSupport)
 
-add_executable(lenet-loader
-                 lenet-loader.cpp)
-target_link_libraries(lenet-loader
+add_executable(en2gr
+                 en2gr.cpp)
+target_link_libraries(en2gr
                       PRIVATE
+                        Base
                         ExecutionEngine
-                        Graph
-                        Importer
-                        Support)
+                        IR
+                        Optimizer
+                        Quantization
+                        Support
+                        LLVMSupport)
+
+#add_executable(lenet-loader
+#                 #lenet-loader.cpp)
+#target_link_libraries(lenet-loader
+#                      PRIVATE
+#                        ExecutionEngine
+#                        Graph
+#                        Importer
+#                        Support)
 
 if(GLOW_WITH_CPU)
   add_executable(resnet-verify

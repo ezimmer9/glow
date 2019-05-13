@@ -1,0 +1,11 @@
+add_executable(model
+                 model.cpp)
+target_link_libraries(model
+                      PRIVATE
+                        Base
+                        ExecutionEngine
+                        IR
+                        Optimizer
+                        Quantization
+                        Support
+                        LLVMSupport)

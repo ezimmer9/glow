@@ -116,31 +116,80 @@ void Model::loadEncoder(){
 	Node *inputEmbedded =
 	   F_->createGather("encoder.embedding", embedding_gr_, input_);
 
-	Node *inputSlice = F_->createSlice("encoder.slice", inputEmbedded , {0,0,0}, {batchSize_ , 1 , EMBEDDING_SIZE});
-
+	std::vector<NodeValue> hidenOutputs;
 	std::vector<NodeValue> outputs;
-	F_->createLSTM(bindings, "encoder.lstm", inputSlice , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
+		Node *inputSlice = F_->createSlice("encoder.slice"+ std::to_string(word_inx),
+				inputEmbedded , {0,word_inx,0}, {batchSize_ , word_inx+1 , EMBEDDING_SIZE});
+		Node *reshape = F_->createReshape("encofer.reshape" + std::to_string(word_inx),
+				inputSlice,{batchSize_, EMBEDDING_SIZE});
+		F_->createLSTM(bindings, "encoder.lstm", reshape , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
 
-	F_->createLSTM(bindings, "encoder.lstm1", outputs[0].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+		F_->createLSTM(bindings, "encoder.lstm1", hidenOutputs[0].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
 
-	F_->createLSTM(bindings, "encoder.lstm2", outputs[1].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
-
-	F_->createLSTM(bindings, "encoder.lstm3", outputs[2].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+		F_->createLSTM(bindings, "encoder.lstm2", hidenOutputs[1].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
+		Node *add1 = F_->createAdd("encoder.residual1",hidenOutputs[1].getNode(), hidenOutputs[2].getNode());
+		F_->createLSTM(bindings, "encoder.lstm3", add1 , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+		hidenOutputs.clear();
+	}
 
 	Node *output = F_->createConcat("encoder.output", outputs, 1);
 
+	encoderHiddenOutput_ = F_->createGather("encoder.outputNth", output, seqLength_);
 
-	Placeholder *S = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, 1}, "S", false);
-	auto *SM = F_->createSoftMax("softmax", output, S);
-	auto *save = F_->createSave("decoder.output", SM);
-	output_ = save->getPlaceholder();
-	bindings.allocate(output_);
-	std::printf("*** loadEncoder ***\n\n");
+}
+
+void Model::loadAttention(){
+	std::printf("*** loadAttention ***\n\n");
 
 }
 
 void Model::loadDecoder(){
 	std::printf("*** loadDecoder ***\n\n");
+
+	auto &mod = EE_.getModule();
+
+//	auto *input = mod.createPlaceholder(ElemKind::Int64ITy, {4*EMBEDDING_SIZE}, "encoder.inputsentence", false);
+//	bindings.allocate(input);
+//
+//	auto *hiddenInit = mod.createPlaceholder(ElemKind::FloatTy, {batchSize_, EMBEDDING_SIZE}, "encoder.hiddenInit", false);
+//	auto *hiddenInitTensor = bindings.allocate(hiddenInit);
+//	hiddenInitTensor->zero();
+//
+//	Node *hidden = hiddenInit;
+//
+//	auto *wIh = mod.createPlaceholder(ElemKind::FloatTy, {EMBEDDING_SIZE, HIDDEN_SIZE},
+//			"dencoder.w_ih", false);
+//	auto *bIh = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+//			"dencoder.b_ih", false);
+//	auto *wHh = mod.createPlaceholder(ElemKind::FloatTy, {EMBEDDING_SIZE, HIDDEN_SIZE},
+//			"dencoder.w_hh", false);
+//	auto *bHh = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+//			"dencoder.b_hh", false);
+//
+//	loadMatrixFromFile("en2gr/encoder_w_ih.bin", *bindings.allocate(wIh));
+//	loadMatrixFromFile("en2gr/encoder_b_ih.bin", *bindings.allocate(bIh));
+//	loadMatrixFromFile("en2gr/encoder_w_hh.bin", *bindings.allocate(wHh));
+//	loadMatrixFromFile("en2gr/encoder_b_hh.bin", *bindings.allocate(bHh));
+
+	Node *inputSlice = F_->createSlice("dencoder.slice", encoderHiddenOutput_ ,
+			{0,0}, {batchSize_ ,4 * EMBEDDING_SIZE});
+
+	std::vector<NodeValue> outputs;
+	F_->createLSTM(bindings, "dencoder.lstm", inputSlice , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+
+	F_->createLSTM(bindings, "dencoder.lstm1", outputs[0].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+
+	F_->createLSTM(bindings, "dencoder.lstm2", outputs[1].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+
+	F_->createLSTM(bindings, "dencoder.lstm3", outputs[2].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
+
+	Node *output = F_->createConcat("dencoder.output", outputs, 1);
+	Placeholder *S = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, 1}, "S", false);
+	auto *SM = F_->createSoftMax("softmax", output, S);
+	auto *save = F_->createSave("decoder.output", SM);
+	output_ = save->getPlaceholder();
+	bindings.allocate(output_);
 }
 
 void Model::translate(const std::vector<std::string> &batch){
@@ -159,7 +208,7 @@ Placeholder *Model::loadEmbedding(llvm::StringRef langPrefix, size_t langSize) {
 }
 
 void Model::compile() {
-	std::printf("********** compile ********\n\n");
+	std::printf("*** compile ***\n\n");
     if (!dumpProfileFileOpt.empty()) {
       // Perform the high-level optimizations before instrumenting the graph.
       // This optimization phase will remove stuff like repetitive transpose

@@ -68,6 +68,7 @@ struct Model {
 
   void loadLanguages();
   void loadEncoder();
+  void loadAttention();
   void loadDecoder();
   void translate(const std::vector<std::string> &batch);
 
@@ -82,6 +83,7 @@ struct Model {
 private:
   Placeholder *embedding_gr_, *embedding_en_;
   Node *encoderHiddenOutput_;
+  Node *attetionOutput_;
 
   Placeholder *loadEmbedding(llvm::StringRef langPrefix, size_t langSize);
 };

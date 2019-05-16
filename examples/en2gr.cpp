@@ -28,5 +28,22 @@ int main(int argc, char **argv){
 	if (!dumpGraphDAGFileOpt.empty()) {
 	    seq2seq.dumpGraphDAG(dumpGraphDAGFileOpt.c_str());
 	}
+
+	std::vector<std::string> batch;
+	do {
+		std::cout << "Please enter a sentence in English " << std::endl;
+		batch.clear();
+	    for (size_t i = 0; i < batchSizeOpt; i++) {
+	    	std::string sentence;
+	    	if (!getline(std::cin, sentence)) {
+	    		break;
+	    	}
+	    	batch.push_back(sentence);
+	    }
+	    if (!batch.empty()) {
+	      seq2seq.translate(batch);
+	    }
+	} while (batch.size() == batchSizeOpt);
+
 	return 0;
 }

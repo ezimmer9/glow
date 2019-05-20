@@ -137,10 +137,60 @@ void Model::loadEncoder(){
 
 	encoderHiddenOutput_ = F_->createGather("encoder.outputNth", output, seqLength_);
 
+	//  ******** example how to change the lstm weights *******
+	//  *******************************************************
+	//auto *test = mod.getPlaceholderByName("encoder_inputsentence");
+	//  convert all placeholders to constants except test
+	//::convertPlaceholdersToConstants(F_ , bindings , {test});
+	//ConstList consts = F_->findConstants();
+	//for (auto con : consts){
+	//	std::cout << "constant: " << con->getName().str ()<< "\n";
+	//}
+	//Constant *test1 = mod.getConstantByName("initial_cell_state391");
+	//std::cout << "tets1 pointer: " << test1 << "\n";
+	//llvm::ArrayRef<size_t> aref = test1->getPayload().dims();
+	//for (uint i=0; i<aref.size(); i++){
+	//	std::cout << " aref[i]: " << aref[i];
+	//}
+	//std::cout << "\n";
+	//std::vector<float> ten(768, 1);
+	//test1->getPayload().getHandle() = ten;
+	//std::printf("Ten in 1st place: %f\n", ten[0]);
+
 }
 
 void Model::loadAttention(){
 	std::printf("*** loadAttention ***\n\n");
+
+	auto &mod = EE_.getModule();
+	auto Wa = mod.createPlaceholder(ElemKind::FloatTy, {10*EMBEDDING_SIZE , HIDDEN_SIZE},
+			"attention.Winside.1" , false);
+	bindings.allocate(Wa)->zero();
+
+	auto Bwa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+				"attention.Binside.1" , false);
+	bindings.allocate(Bwa)->zero();
+
+	auto Ua = mod.createPlaceholder(ElemKind::FloatTy, {10*EMBEDDING_SIZE , HIDDEN_SIZE},
+			"attention.Winside.2" , false);
+	bindings.allocate(Ua)->zero();
+
+	auto Bua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+			"attention.Binside.2" , false);
+	bindings.allocate(Bua)->zero();
+
+	Node *AFCinside1 = F_->createFullyConnected("attention.fc1.inside" , encoderHiddenOutput_ , Wa , Bwa);
+	Node *AFCinside2 = F_->createFullyConnected("attention.fc2.inside" , encoderHiddenOutput_ , Ua , Bua);
+
+	Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
+			"attention.add.inside", AFCinside1, AFCinside2));
+
+	auto We = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE}, "attention.Wout.1", false);
+	bindings.allocate(We)->zero();
+	auto Bwe = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "attention.Bout.1", false);
+	bindings.allocate(Bwe)->zero();
+
+	Node *AFCout1 = F_->createFullyConnected("attention.fc1.out" , THinside, We , Bwe);
 
 }
 
@@ -150,7 +200,7 @@ void Model::loadDecoder(){
 	auto &mod = EE_.getModule();
 	Node *r2 = F_->createReshape("decoder.output.r2", encoderHiddenOutput_,
 		                               {MAX_LENGTH * batchSize_, EMBEDDING_SIZE});
-	std::vector<NodeValue> hidenOuteputs;
+	std::vector<NodeValue> hidenOutputs;
 	std::vector<NodeValue> outputs;
 	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
 		Node *inputSlice = F_->createSlice("encoder.slice"+ std::to_string(word_inx),

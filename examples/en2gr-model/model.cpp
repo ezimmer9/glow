@@ -93,11 +93,25 @@ void Model::loadEncoder(){
 	seqLength_ = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_}, "encoder.seqLength", false);
 	bindings.allocate(seqLength_);
 
-	auto *hiddenInit = mod.createPlaceholder(ElemKind::FloatTy, {batchSize_, EMBEDDING_SIZE}, "encoder.hiddenInit", false);
-	auto *hiddenInitTensor = bindings.allocate(hiddenInit);
-	hiddenInitTensor->zero();
-
-	Node *hidden = hiddenInit;
+//	Placeholder *hiddenInit1 = mod.createPlaceholder(ElemKind::FloatTy,
+//					{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(1)+".hiddenInit", false);
+//	bindings.allocate(hiddenInit1)->zero();
+//	Node *hidden1 = hiddenInit1;
+//
+//	Placeholder *hiddenInit2 = mod.createPlaceholder(ElemKind::FloatTy,
+//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(2)+".hiddenInit", false);
+//	bindings.allocate(hiddenInit2)->zero();
+//	Node *hidden2 = hiddenInit2;
+//
+//	Placeholder *hiddenInit3 = mod.createPlaceholder(ElemKind::FloatTy,
+//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(3)+".hiddenInit", false);
+//	bindings.allocate(hiddenInit3)->zero();
+//	Node *hidden3 = hiddenInit3;
+//
+//	Placeholder *hiddenInit4 = mod.createPlaceholder(ElemKind::FloatTy,
+//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(4)+".hiddenInit", false);
+//	bindings.allocate(hiddenInit4)->zero();
+//	Node *hidden4 = hiddenInit4;
 
 	auto *wIh = mod.createPlaceholder(
 			ElemKind::FloatTy, {EMBEDDING_SIZE, HIDDEN_SIZE}, "encoder.w_ih", false);
@@ -116,26 +130,66 @@ void Model::loadEncoder(){
 	Node *inputEmbedded =
 	   F_->createGather("encoder.embedding", embedding_en_, input_);
 
-	std::vector<NodeValue> hidenOutputs;
-	std::vector<NodeValue> outputs;
+	std::vector<NodeValue> hidenOutputs0;
+	std::vector<Node *> hiddenOut0;
+	std::vector<NodeValue> hidenOutputs1;
+	std::vector<Node *> hiddenOut1;
+	std::vector<NodeValue> hidenOutputs2;
+	std::vector<Node *> hiddenOut2;
+	std::vector<NodeValue> hidenOutputs3;
+	std::vector<Node *> hiddenOut3;
+
+	std::vector<Node *> enc_seq;
+
 	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
-		Node *inputSlice = F_->createSlice("encoder.slice"+ std::to_string(word_inx),
+		Node *inputSlice = F_->createSlice("encoder.slice."+ std::to_string(word_inx),
 				inputEmbedded , {0,word_inx,0}, {batchSize_ , word_inx+1 , EMBEDDING_SIZE});
-		Node *reshape = F_->createReshape("encofer.reshape" + std::to_string(word_inx),
+		Node *reshape = F_->createReshape("encofer.reshape." + std::to_string(word_inx),
 				inputSlice,{batchSize_, EMBEDDING_SIZE});
-		F_->createLSTM(bindings, "encoder.lstm", reshape , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-
-		F_->createLSTM(bindings, "encoder.lstm1", hidenOutputs[0].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-
-		F_->createLSTM(bindings, "encoder.lstm2", hidenOutputs[1].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-		Node *add1 = F_->createAdd("encoder.residual1",hidenOutputs[1].getNode(), hidenOutputs[2].getNode());
-		F_->createLSTM(bindings, "encoder.lstm3", add1 , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
-		hidenOutputs.clear();
+		enc_seq.push_back(reshape);
 	}
 
-	Node *output = F_->createConcat("encoder.output", outputs, 1);
+	for (int word_inx=0 ; word_inx < 1; word_inx++){
+		F_->createLSTM(bindings, "encoder."+std::to_string(word_inx)+".lstm", enc_seq ,
+				batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
+		for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
+			hiddenOut0.push_back(hidenOutputs0[i].getNode());
+		}
 
-	encoderHiddenOutput_ = F_->createGather("encoder.outputNth", output, seqLength_);
+		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm1",hiddenOut0 ,
+				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
+		for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
+			hiddenOut1.push_back(hidenOutputs1[i].getNode());
+		}
+
+		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm2",hiddenOut1 ,
+				batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs2);
+		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+			hiddenOut2.push_back(hidenOutputs2[i].getNode());
+		}
+
+		GLOW_ASSERT(hidenOutputs2.size() == hidenOutputs1.size() && "LSTM outputs doesn't align");
+		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+			Node *add1 = F_->createAdd("encoder."+std::to_string(i)+".residual",hidenOutputs2[i], hidenOutputs1[i]);
+			hiddenOut3.push_back(add1);
+		}
+		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm3",hiddenOut3 ,
+				batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs3);
+
+		hidenOutputs0.clear();
+		hidenOutputs1.clear();
+		hidenOutputs2.clear();
+		hiddenOut0.clear();
+		hiddenOut1.clear();
+		hiddenOut2.clear();
+		hiddenOut3.clear();
+	}
+
+	Node *output = F_->createConcat("encoder.output", hidenOutputs3, 1);
+	hidenOutputs3.clear();
+	// TODO: maybe no need here the reshape concat 3rd arg is dimension
+	encoderHiddenOutput_ = F_->createReshape("encoder.output.reshape", output,
+			{MAX_LENGTH , HIDDEN_SIZE});
 
 	//  ******** example how to change the lstm weights *******
 	//  *******************************************************
@@ -159,11 +213,19 @@ void Model::loadEncoder(){
 
 }
 
-void Model::loadAttention(){
+void debug_size_print(Node *candident){
+	TypeRef t_1 =  candident->getType(0);std::cout << candident->getName().str() << " dims:  ";
+	for (uint i=0 ; i < t_1->dims().size(); i++){
+		std::cout << t_1->dims()[i] << " " ;
+	}
+	std::cout << " " << std::endl << std::endl;
+}
+
+std::vector<Node *> Model::loadAttention(std::vector<Node *> AttentionQuery){
 	std::printf("*** loadAttention ***\n\n");
 
 	auto &mod = EE_.getModule();
-	auto Wa = mod.createPlaceholder(ElemKind::FloatTy, {10*EMBEDDING_SIZE , HIDDEN_SIZE},
+	auto Wa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.Winside.1" , false);
 	bindings.allocate(Wa)->zero();
 
@@ -171,7 +233,7 @@ void Model::loadAttention(){
 				"attention.Binside.1" , false);
 	bindings.allocate(Bwa)->zero();
 
-	auto Ua = mod.createPlaceholder(ElemKind::FloatTy, {10*EMBEDDING_SIZE , HIDDEN_SIZE},
+	auto Ua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.Winside.2" , false);
 	bindings.allocate(Ua)->zero();
 
@@ -179,43 +241,139 @@ void Model::loadAttention(){
 			"attention.Binside.2" , false);
 	bindings.allocate(Bua)->zero();
 
-	Node *AFCinside1 = F_->createFullyConnected("attention.fc1.inside" , encoderHiddenOutput_ , Wa , Bwa);
-	Node *AFCinside2 = F_->createFullyConnected("attention.fc2.inside" , encoderHiddenOutput_ , Ua , Bua);
-
-	Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
-			"attention.add.inside", AFCinside1, AFCinside2));
-
-	auto We = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE}, "attention.Wout.1", false);
+	auto We = mod.createPlaceholder(ElemKind::FloatTy, {MAX_LENGTH,HIDDEN_SIZE}, "attention.Wout.1", false);
 	bindings.allocate(We)->zero();
 	auto Bwe = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "attention.Bout.1", false);
 	bindings.allocate(Bwe)->zero();
 
-	Node *AFCout1 = F_->createFullyConnected("attention.fc1.out" , THinside, We , Bwe);
+	Placeholder *Vt = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , 1}, "attention.Vt", false);
+	Node *NVt = Vt;
+	bindings.allocate(Vt)->zero();
+
+	Placeholder *QueryExpandPH = mod.createPlaceholder(ElemKind::FloatTy, {MAX_LENGTH, HIDDEN_SIZE}, "attention.queryExtand,placeholder", false);
+	bindings.allocate(QueryExpandPH)->zero();
+
+	Placeholder *SM = mod.createPlaceholder(ElemKind::FloatTy, {1 , 1}, "attention.softmax.ph", false);
+
+	std::vector<Node *> attentionOut;
+	for (uint i=0 ; i < AttentionQuery.size() ; i++){
+		debug_size_print(AttentionQuery[i]);
+		Node *AFCinside1 = F_->createFullyConnected("attention.fc1.inside"  , encoderHiddenOutput_, Wa , Bwa);
+		debug_size_print(AFCinside1);
+		Node *AFCinside2 = F_->createFullyConnected("attention.fc2.inside" ,  AttentionQuery[i] , Ua , Bua);
+		debug_size_print(AFCinside2);
+//		std::vector<NodeValue> Qexpand;
+//		for (uint i=0 ; i < MAX_LENGTH ; i++){
+//			Node *tmpNode = AFCinside2->clone();
+//			std::printf("tmpNode pointer %p AFCin %p\n", tmpNode, AFCinside2);
+//			NodeValue tmpNV(tmpNode);
+//			Qexpand.push_back(tmpNV);
+//		}
+		Node *QueryExpand = QueryExpandPH;
+		debug_size_print(QueryExpand);
+		Node *QueryExpandReshape =F_->createReshape("attention.q.exp.reshape",
+				QueryExpand , {MAX_LENGTH,HIDDEN_SIZE});
+		debug_size_print(QueryExpandReshape);
+		Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
+				"attention.add.inside", AFCinside1, QueryExpandReshape));
+		debug_size_print(THinside);
+		debug_size_print(NVt);
+		Node *Amul = F_->createMatMul("attention_matmul",THinside,NVt);
+		debug_size_print(Amul);
+		std::cout << static_cast<int>(Amul->getType(0)->getElementType()) << std::endl;
+		Node *Asoftmax = F_->createSoftMax("attention.softmax" , Amul , SM);
+		debug_size_print(Asoftmax);
+		// **** need to check where is the transpose happen ****
+		Node *ATranspose = F_->createTranspose("attention.transpose",Asoftmax , {1 ,0});
+		debug_size_print(ATranspose);
+		Node *AFCout1 = F_->createFullyConnected("attention.fc1.out" , ATranspose, We, Bwe);
+		debug_size_print(AFCout1);
+		attentionOut.push_back(AFCout1);
+	}
+	return attentionOut;
 
 }
 
 void Model::loadDecoder(){
 	std::printf("*** loadDecoder ***\n\n");
-
 	auto &mod = EE_.getModule();
-	Node *r2 = F_->createReshape("decoder.output.r2", encoderHiddenOutput_,
-		                               {MAX_LENGTH * batchSize_, EMBEDDING_SIZE});
-	std::vector<NodeValue> hidenOutputs;
-	std::vector<NodeValue> outputs;
-	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
-		Node *inputSlice = F_->createSlice("encoder.slice"+ std::to_string(word_inx),
-				r2 , {word_inx,0}, {word_inx+1, EMBEDDING_SIZE});
 
-		F_->createLSTM(bindings, "decoder.lstm", inputSlice , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-
-		F_->createLSTM(bindings, "decoder.lstm1", hidenOutputs[0].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-
-		F_->createLSTM(bindings, "decoder.lstm2", hidenOutputs[1].getNode() , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs);
-		Node *add1 = F_->createAdd("decoder.residual1",hidenOutputs[1].getNode(), hidenOutputs[2].getNode());
-		F_->createLSTM(bindings, "decoder.lstm3", add1 , batchSize_, HIDDEN_SIZE , EMBEDDING_SIZE, outputs);
-		hidenOutputs.clear();
+	std::vector<Node *> dec_seq;
+	for (uint i=0 ; i < MAX_LENGTH ; i++){
+		Placeholder *hiddenInit = mod.createPlaceholder(ElemKind::FloatTy,
+				{batchSize_, EMBEDDING_SIZE}, "decoder."+std::to_string(i)+".hiddenInit", false);
+		bindings.allocate(hiddenInit)->zero();
+		Node *seqInit = hiddenInit;
+		dec_seq.push_back(seqInit);
 	}
-	Node *output = F_->createConcat("dencoder.output", outputs, 1);
+
+	//TODO: init the 1st dec_seq with </s> embedding
+	// the Initial vector fot the decoder will be:
+	// { embedding(</s>), 0 , 0 ,0 ...}
+
+	std::vector<NodeValue> hidenOutputs0;
+	std::vector<Node *> hiddenOut0;
+	std::vector<NodeValue> hidenOutputs1;
+	std::vector<Node *> hiddenOut1;
+	std::vector<NodeValue> hidenOutputs2;
+	std::vector<Node *> hiddenOut2;
+	std::vector<NodeValue> hidenOutputs3;
+	std::vector<Node *> hiddenOut3;
+
+	for (uint word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
+		std::printf("***************** word_ind %u***************\n", word_inx);
+		F_->createLSTM(bindings, "decoder.lstm.0."+std::to_string(word_inx), dec_seq ,
+				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs0);
+		for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
+			hiddenOut0.push_back(hidenOutputs0[i].getNode());
+		}
+
+		std::vector<Node *> attentionOut = loadAttention(hiddenOut0);
+		for (uint i=0 ; i < hiddenOut0.size() ; i++){
+			NodeValue attentionOutNV(attentionOut[i]);
+			debug_size_print(attentionOutNV);
+			NodeValue hiddenOut0NV(hiddenOut0[i]);
+			debug_size_print(hiddenOut0NV);
+			attentionOut[i] = F_->createConcat("decoder.concat", {attentionOutNV, hiddenOut0NV},1);
+		}
+
+		F_->createLSTM(bindings, "decoder.lstm.1."+std::to_string(word_inx), attentionOut ,
+				batchSize_, /* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs1);
+		for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
+			hiddenOut1.push_back(hidenOutputs1[i].getNode());
+		}
+
+		F_->createLSTM(bindings, "decoder.lstm.2."+std::to_string(word_inx), hiddenOut1 ,
+				batchSize_, /* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs2);
+		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+			hiddenOut2.push_back(hidenOutputs2[i].getNode());
+		}
+
+		GLOW_ASSERT(hidenOutputs2.size() == hidenOutputs1.size() && "LSTM outputs doesn't align");
+		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+			Node *add1 = F_->createAdd("decoder."+std::to_string(i)+".residual",hidenOutputs2[i], hidenOutputs1[i]);
+			hiddenOut3.push_back(add1);
+		}
+		F_->createLSTM(bindings, "decoder.lstm.3."+std::to_string(word_inx), hiddenOut3 , batchSize_,
+				/* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs3);
+
+		hidenOutputs0.clear();
+		hidenOutputs1.clear();
+		hidenOutputs2.clear();
+		hiddenOut0.clear(); hiddenOut1.clear(); hiddenOut2.clear(); hiddenOut3.clear();
+		// TODO: think how to avoid the last allocation for dec_seq
+		if (word_inx+1 < MAX_LENGTH){
+			dec_seq[word_inx+1] = hidenOutputs3[word_inx];
+		}
+		hidenOutputs3.clear();
+
+	}
+	std::vector<NodeValue> lstmOutput;
+	for (uint i=0 ; i<dec_seq.size() ; i++){
+		NodeValue tmpNodeValue(dec_seq[i]);
+		lstmOutput.push_back(tmpNodeValue);
+	}
+	Node *output = F_->createConcat("dencoder.output", lstmOutput, 1);
 	Placeholder *S = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, 1}, "S", false);
 	auto *SM = F_->createSoftMax("softmax", output, S);
 	auto *save = F_->createSave("decoder.output", SM);
@@ -322,5 +480,6 @@ void Model::compile() {
       ::glow::convertPlaceholdersToConstants(F_, bindings,
                                              {input_, seqLength_, output_});
     }
+    std::cout << static_cast<int>(EE_.getBackend()->getBackendKind());
     EE_.compile(CompilationMode::Infer, F_);
 }

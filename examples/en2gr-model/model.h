@@ -25,7 +25,9 @@
 #include <vector>
 using namespace glow;
 
-const unsigned MAX_LENGTH = 10;
+const unsigned ENCODER_LSTMS_NUM = 4;
+const unsigned DECODER_LSTMS_NUM = 4;
+const unsigned MAX_LENGTH = 3;
 const unsigned EMBEDDING_SIZE = 256;
 const unsigned HIDDEN_SIZE = EMBEDDING_SIZE * 3;
 
@@ -68,7 +70,7 @@ struct Model {
 
   void loadLanguages();
   void loadEncoder();
-  void loadAttention();
+  std::vector<Node *> loadAttention(std::vector<Node *> AttentionQuery);
   void loadDecoder();
   void translate(const std::vector<std::string> &batch);
 

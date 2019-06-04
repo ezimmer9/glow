@@ -99,9 +99,6 @@ void Model::loadEncoder(){
 	input_ = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, MAX_LENGTH}, "encoder.inputsentence", false);
 	bindings.allocate(input_);
 
-	seqLength_ = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_}, "encoder.seqLength", false);
-	bindings.allocate(seqLength_);
-
 	auto *wIh = mod.createPlaceholder(
 			ElemKind::FloatTy, {EMBEDDING_SIZE, HIDDEN_SIZE}, "encoder.w_ih", false);
 	auto *bIh = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
@@ -131,48 +128,47 @@ void Model::loadEncoder(){
 	std::vector<Node *> enc_seq;
 
 	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
-		Node *inputSlice = F_->createSlice("encoder.slice."+ std::to_string(word_inx),
+		Node *inputSlice = F_->createSlice("encoder.slice.",
 				inputEmbedded , {0,word_inx,0}, {batchSize_ , word_inx+1 , EMBEDDING_SIZE});
 		Node *reshape = F_->createReshape("encofer.reshape." + std::to_string(word_inx),
 				inputSlice,{batchSize_, EMBEDDING_SIZE});
 		enc_seq.push_back(reshape);
 	}
 
-	for (int word_inx=0 ; word_inx < 1; word_inx++){
-		F_->createLSTM(bindings, "encoder."+std::to_string(word_inx)+".lstm", enc_seq ,
-				batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
-		for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
-			hiddenOut0.push_back(hidenOutputs0[i].getNode());
-		}
-
-		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm1",hiddenOut0 ,
-				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
-		for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
-			hiddenOut1.push_back(hidenOutputs1[i].getNode());
-		}
-
-		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm2",hiddenOut1 ,
-				batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs2);
-		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
-			hiddenOut2.push_back(hidenOutputs2[i].getNode());
-		}
-
-		GLOW_ASSERT(hidenOutputs2.size() == hidenOutputs1.size() && "LSTM outputs doesn't align");
-		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
-			Node *add1 = F_->createAdd("encoder."+std::to_string(i)+".residual",hidenOutputs2[i], hidenOutputs1[i]);
-			hiddenOut3.push_back(add1);
-		}
-		F_->createLSTM(bindings,"encoder."+std::to_string(word_inx)+".lstm3",hiddenOut3 ,
-				batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs3);
-
-		hidenOutputs0.clear();
-		hidenOutputs1.clear();
-		hidenOutputs2.clear();
-		hiddenOut0.clear();
-		hiddenOut1.clear();
-		hiddenOut2.clear();
-		hiddenOut3.clear();
+	// Bi-Directional LSTM.
+	F_->createLSTM(bindings, "encoder.lstm.", enc_seq ,
+			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
+	for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
+		hiddenOut0.push_back(hidenOutputs0[i].getNode());
 	}
+
+	F_->createLSTM(bindings,"encoder.lstm1.",hiddenOut0 ,
+			batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
+	for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
+		hiddenOut1.push_back(hidenOutputs1[i].getNode());
+	}
+
+	F_->createLSTM(bindings,"encoder.lstm2.",hiddenOut1 ,
+			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs2);
+	for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+		hiddenOut2.push_back(hidenOutputs2[i].getNode());
+	}
+
+	GLOW_ASSERT(hidenOutputs2.size() == hidenOutputs1.size() && "LSTM outputs doesn't align");
+	for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+		Node *add1 = F_->createAdd("encoder."+std::to_string(i)+".residual.",hidenOutputs2[i], hidenOutputs1[i]);
+		hiddenOut3.push_back(add1);
+	}
+	F_->createLSTM(bindings,"encoder.lstm3.",hiddenOut3 ,
+			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs3);
+
+	hidenOutputs0.clear();
+	hidenOutputs1.clear();
+	hidenOutputs2.clear();
+	hiddenOut0.clear();
+	hiddenOut1.clear();
+	hiddenOut2.clear();
+	hiddenOut3.clear();
 
 	Node *output = F_->createConcat("encoder.output", hidenOutputs3, 1);
 	hidenOutputs3.clear();
@@ -263,6 +259,7 @@ std::vector<Node *> Model::loadAttention(std::vector<Node *> AttentionQuery){
 		Node *AddQuery = F_->createAdd("attention.addquery", BroadQuery, BroadForQureAdd);
 		debug_size_print(AddQuery);
 
+		//TODO: pass to the concat none hardcoded length
 		Node *copyQuery = F_->createConcat("attention.concatquery",{AddQuery,AddQuery,AddQuery},1);
 		debug_size_print(copyQuery);
 		Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
@@ -327,7 +324,8 @@ void Model::loadDecoder(){
 			debug_size_print(attentionOutNV);
 			NodeValue hiddenOut0NV(hiddenOut0[i]);
 			debug_size_print(hiddenOut0NV);
-			attentionOut[i] = F_->createConcat("decoder.concat", {attentionOutNV, hiddenOut0NV},1);
+			attentionOut[i] = F_->createConcat("decoder."+std::to_string(i)+".concat",
+					{attentionOutNV, hiddenOut0NV},1);
 		}
 
 		F_->createLSTM(bindings, "decoder.lstm.1."+std::to_string(word_inx), attentionOut ,
@@ -372,6 +370,11 @@ void Model::loadDecoder(){
 	auto *save = F_->createSave("decoder.output", SM);
 	output_ = save->getPlaceholder();
 	bindings.allocate(output_);
+	for (auto &node : F_->getNodes()){
+		std::string name = node.getName();
+		std::cout << "the Node name is: "<< name.c_str() << std::endl;
+	}
+
 }
 
 void Model::translate(const std::vector<std::string> &batch){

@@ -82,6 +82,15 @@ void Model::loadLanguages(){
 	embedding_en_ = loadEmbedding("en", en_.index2word_.size());
 }
 
+
+void debug_size_print(Node *candident){
+	TypeRef t_1 =  candident->getType(0);std::cout << candident->getName().str() << " dims:  ";
+	for (uint i=0 ; i < t_1->dims().size(); i++){
+		std::cout << t_1->dims()[i] << " " ;
+	}
+	std::cout << " " << std::endl << std::endl;
+}
+
 void Model::loadEncoder(){
 	std::printf("*** loadEncoder ***\n\n");
 
@@ -92,26 +101,6 @@ void Model::loadEncoder(){
 
 	seqLength_ = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_}, "encoder.seqLength", false);
 	bindings.allocate(seqLength_);
-
-//	Placeholder *hiddenInit1 = mod.createPlaceholder(ElemKind::FloatTy,
-//					{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(1)+".hiddenInit", false);
-//	bindings.allocate(hiddenInit1)->zero();
-//	Node *hidden1 = hiddenInit1;
-//
-//	Placeholder *hiddenInit2 = mod.createPlaceholder(ElemKind::FloatTy,
-//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(2)+".hiddenInit", false);
-//	bindings.allocate(hiddenInit2)->zero();
-//	Node *hidden2 = hiddenInit2;
-//
-//	Placeholder *hiddenInit3 = mod.createPlaceholder(ElemKind::FloatTy,
-//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(3)+".hiddenInit", false);
-//	bindings.allocate(hiddenInit3)->zero();
-//	Node *hidden3 = hiddenInit3;
-//
-//	Placeholder *hiddenInit4 = mod.createPlaceholder(ElemKind::FloatTy,
-//						{batchSize_, EMBEDDING_SIZE}, "encoder."+ std::to_string(4)+".hiddenInit", false);
-//	bindings.allocate(hiddenInit4)->zero();
-//	Node *hidden4 = hiddenInit4;
 
 	auto *wIh = mod.createPlaceholder(
 			ElemKind::FloatTy, {EMBEDDING_SIZE, HIDDEN_SIZE}, "encoder.w_ih", false);
@@ -189,7 +178,7 @@ void Model::loadEncoder(){
 	hidenOutputs3.clear();
 	// TODO: maybe no need here the reshape concat 3rd arg is dimension
 	encoderHiddenOutput_ = F_->createReshape("encoder.output.reshape", output,
-			{MAX_LENGTH , HIDDEN_SIZE});
+			{batchSize_, MAX_LENGTH , HIDDEN_SIZE});
 
 	//  ******** example how to change the lstm weights *******
 	//  *******************************************************
@@ -213,83 +202,87 @@ void Model::loadEncoder(){
 
 }
 
-void debug_size_print(Node *candident){
-	TypeRef t_1 =  candident->getType(0);std::cout << candident->getName().str() << " dims:  ";
-	for (uint i=0 ; i < t_1->dims().size(); i++){
-		std::cout << t_1->dims()[i] << " " ;
-	}
-	std::cout << " " << std::endl << std::endl;
-}
-
 std::vector<Node *> Model::loadAttention(std::vector<Node *> AttentionQuery){
 	std::printf("*** loadAttention ***\n\n");
 
 	auto &mod = EE_.getModule();
 	auto Wa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
-			"attention.Winside.1" , false);
+			"attention.1.Wfc1" , false);
 	bindings.allocate(Wa)->zero();
 
 	auto Bwa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
-				"attention.Binside.1" , false);
+				"attention.1.Bfc1" , false);
 	bindings.allocate(Bwa)->zero();
 
 	auto Ua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
-			"attention.Winside.2" , false);
+			"attention.2.Winside" , false);
 	bindings.allocate(Ua)->zero();
 
 	auto Bua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
-			"attention.Binside.2" , false);
+			"attention.2.Binside" , false);
 	bindings.allocate(Bua)->zero();
 
-	auto We = mod.createPlaceholder(ElemKind::FloatTy, {MAX_LENGTH,HIDDEN_SIZE}, "attention.Wout.1", false);
+	auto We = mod.createPlaceholder(ElemKind::FloatTy, {MAX_LENGTH,HIDDEN_SIZE}, "attention.1.Wout", false);
 	bindings.allocate(We)->zero();
-	auto Bwe = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "attention.Bout.1", false);
+	auto Bwe = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "attention.1.Bout", false);
 	bindings.allocate(Bwe)->zero();
 
-	Placeholder *Vt = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , 1}, "attention.Vt", false);
+	Placeholder *Vt = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE,1}, "attention.Vt", false);
 	Node *NVt = Vt;
 	bindings.allocate(Vt)->zero();
 
-	Placeholder *QueryExpandPH = mod.createPlaceholder(ElemKind::FloatTy, {MAX_LENGTH, HIDDEN_SIZE}, "attention.queryExtand,placeholder", false);
-	bindings.allocate(QueryExpandPH)->zero();
+	Placeholder *SM = mod.createPlaceholder(ElemKind::Int64ITy, {1 , 1}, "attention.softmax.ph", false);
 
-	Placeholder *SM = mod.createPlaceholder(ElemKind::FloatTy, {1 , 1}, "attention.softmax.ph", false);
+//	Node *expandKeys = F_->createExpandDims("encoder.expand.output", encoderHiddenOutput_ ,
+//			{1});
+//	debug_size_print(expandKeys);
 
 	std::vector<Node *> attentionOut;
+	std::vector<NodeValue> Qexpand;
 	for (uint i=0 ; i < AttentionQuery.size() ; i++){
 		debug_size_print(AttentionQuery[i]);
-		Node *AFCinside1 = F_->createFullyConnected("attention.fc1.inside"  , encoderHiddenOutput_, Wa , Bwa);
-		debug_size_print(AFCinside1);
-		Node *AFCinside2 = F_->createFullyConnected("attention.fc2.inside" ,  AttentionQuery[i] , Ua , Bua);
-		debug_size_print(AFCinside2);
-//		std::vector<NodeValue> Qexpand;
-//		for (uint i=0 ; i < MAX_LENGTH ; i++){
-//			Node *tmpNode = AFCinside2->clone();
-//			std::printf("tmpNode pointer %p AFCin %p\n", tmpNode, AFCinside2);
-//			NodeValue tmpNV(tmpNode);
-//			Qexpand.push_back(tmpNV);
-//		}
-		Node *QueryExpand = QueryExpandPH;
+
+		//TODO: not need to do every iteration
+		// this is instead of fullyconected that support only 2 dimentions.
+		Node *BroadKeys = F_->createBroadcastedBatchMatMul("attention.broadkeys",
+				encoderHiddenOutput_,Wa);
+		Node *BroadForAdd = F_->createBroadcast("attention.BroadForAdd",
+				Bwa , {batchSize_, MAX_LENGTH , HIDDEN_SIZE} , 2);
+		Node *AddKeys = F_->createAdd("attention.addkeys", BroadKeys, BroadForAdd);
+		debug_size_print(AddKeys);
+
+		Node *QueryExpand = F_->createExpandDims("attention."+ std::to_string(i)+ ".expandquery",
+				AttentionQuery[i], {1});;
 		debug_size_print(QueryExpand);
-		Node *QueryExpandReshape =F_->createReshape("attention.q.exp.reshape",
-				QueryExpand , {MAX_LENGTH,HIDDEN_SIZE});
-		debug_size_print(QueryExpandReshape);
+
+		// this is instead of fullyconected that support only 2 dimentions.
+		Node *BroadQuery = F_->createBroadcastedBatchMatMul("attention.broadquery",
+				QueryExpand ,Ua);
+		Node *BroadForQureAdd = F_->createBroadcast("attention.BroadForQureAdd",
+				Bua , {batchSize_, 1 , HIDDEN_SIZE} , 2);
+		Node *AddQuery = F_->createAdd("attention.addquery", BroadQuery, BroadForQureAdd);
+		debug_size_print(AddQuery);
+
+		Node *copyQuery = F_->createConcat("attention.concatquery",{AddQuery,AddQuery,AddQuery},1);
+		debug_size_print(copyQuery);
 		Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
-				"attention.add.inside", AFCinside1, QueryExpandReshape));
+				"attention.add." + std::to_string(i) + ".inside", AddKeys, copyQuery));
 		debug_size_print(THinside);
-		debug_size_print(NVt);
-		Node *Amul = F_->createMatMul("attention_matmul",THinside,NVt);
+		Node *Amul = F_->createBroadcastedBatchMatMul("attention."+ std::to_string(i) + ".matmul"
+				,THinside,NVt);
 		debug_size_print(Amul);
-		std::cout << static_cast<int>(Amul->getType(0)->getElementType()) << std::endl;
-		Node *Asoftmax = F_->createSoftMax("attention.softmax" , Amul , SM);
+		Node *Asoftmax = F_->createSoftMax("attention."+std::to_string(i) + ".softmax" , Amul , SM);
 		debug_size_print(Asoftmax);
 		// **** need to check where is the transpose happen ****
-		Node *ATranspose = F_->createTranspose("attention.transpose",Asoftmax , {1 ,0});
-		debug_size_print(ATranspose);
-		Node *AFCout1 = F_->createFullyConnected("attention.fc1.out" , ATranspose, We, Bwe);
+//		Node *ATranspose = F_->createTranspose("attention."+ std::to_string(i) + ".transpose",Asoftmax , {1 ,0});
+//		debug_size_print(ATranspose);
+		Node *AFCout1 = F_->createFullyConnected("attention."+ std::to_string(i) + ".fc1.out" , Asoftmax, We, Bwe);
 		debug_size_print(AFCout1);
 		attentionOut.push_back(AFCout1);
+		Qexpand.clear();
 	}
+
+
 	return attentionOut;
 
 }
@@ -480,6 +473,5 @@ void Model::compile() {
       ::glow::convertPlaceholdersToConstants(F_, bindings,
                                              {input_, seqLength_, output_});
     }
-    std::cout << static_cast<int>(EE_.getBackend()->getBackendKind());
     EE_.compile(CompilationMode::Infer, F_);
 }

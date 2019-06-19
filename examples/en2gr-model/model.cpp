@@ -65,9 +65,13 @@ llvm::cl::opt<std::string> dumpGraphDAGFileOpt(
 /// Loads tensor of floats from binary file.
 void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
   std::ifstream file(filename.str(), std::ios::binary);
+  assert(file.is_open() == true);
+  //metadata meta;
+  //meta.read_from_file(file);
   if (!file.read(result.getUnsafePtr(), result.size() * sizeof(float))) {
-    std::cout << "Error reading file: " << filename.str() << '\n'
-              << "Need to be downloaded by calling:\n"
+	  std::cout << "Error: only " << file.gcount() << " could be read\n";
+	  std::cout << "Error reading file: " << filename.str() << '\n'
+			  << "Need to be downloaded by calling:\n"
               << "python ../glow/utils/download_test_db.py -d fr2en\n";
     exit(1);
   }
@@ -82,6 +86,11 @@ void Model::loadLanguages(){
 	embedding_en_ = loadEmbedding("en", en_.index2word_.size());
 }
 
+void Model::loadTokens(){
+	std::printf("*** loadTokens ***\n\n");
+	tok_.loadVocabularyFromFile("/home/ezimmer9/Desktop/glow/examples/en2gr-model/vocab.bpe.32000");
+	embedding_tok_ = loadEmbedding("encoder.embedder.weight", tok_.index2word_.size());
+}
 
 void debug_size_print(Node *candident){
 	TypeRef t_1 =  candident->getType(0);std::cout << candident->getName().str() << " dims:  ";
@@ -118,37 +127,62 @@ void Model::loadEncoder(){
 
 	std::vector<NodeValue> hidenOutputs0;
 	std::vector<Node *> hiddenOut0;
+	std::vector<NodeValue> oppHidenOutputs0;
+	std::vector<Node *> oppHiddenOut0;
 	std::vector<NodeValue> hidenOutputs1;
 	std::vector<Node *> hiddenOut1;
 	std::vector<NodeValue> hidenOutputs2;
 	std::vector<Node *> hiddenOut2;
 	std::vector<NodeValue> hidenOutputs3;
 	std::vector<Node *> hiddenOut3;
+	std::vector<NodeValue> encOut;
 
 	std::vector<Node *> enc_seq;
+	std::vector<Node *> opposite_seq;
 
 	for (unsigned word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
 		Node *inputSlice = F_->createSlice("encoder.slice.",
 				inputEmbedded , {0,word_inx,0}, {batchSize_ , word_inx+1 , EMBEDDING_SIZE});
-		Node *reshape = F_->createReshape("encofer.reshape." + std::to_string(word_inx),
+		Node *reshape = F_->createReshape("encoder.reshape." + std::to_string(word_inx),
 				inputSlice,{batchSize_, EMBEDDING_SIZE});
 		enc_seq.push_back(reshape);
+
+		Node *oppInputSlice = F_->createSlice("opp.encoder.slice.",
+				inputEmbedded , {0,MAX_LENGTH-word_inx-1,0}, {batchSize_ ,MAX_LENGTH-word_inx, EMBEDDING_SIZE});
+		Node *oppReshape = F_->createReshape("opp.encoder.reshape." + std::to_string(word_inx),
+				oppInputSlice,{batchSize_, EMBEDDING_SIZE});
+		opposite_seq.push_back(oppReshape);
 	}
 
 	// Bi-Directional LSTM.
-	F_->createLSTM(bindings, "encoder.lstm.", enc_seq ,
+	F_->createLSTM(bindings, "encoder.lstm", enc_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
 	for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
 		hiddenOut0.push_back(hidenOutputs0[i].getNode());
 	}
 
-	F_->createLSTM(bindings,"encoder.lstm1.",hiddenOut0 ,
-			batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
+	F_->createLSTM(bindings, "encoder.opp.lstm", opposite_seq ,
+			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, oppHidenOutputs0);
+	for (uint i = 0 ; i < oppHidenOutputs0.size() ; i++){
+		oppHiddenOut0.push_back(oppHidenOutputs0[i].getNode());
+	}
+	std::vector<Node *> lstm0Concat;
+	for (uint i=0 ; i < hiddenOut0.size() ; i++){
+		NodeValue opphiddenOut0NV(oppHiddenOut0[i]);
+		NodeValue hiddenOut0NV(hiddenOut0[i]);
+		lstm0Concat.push_back(F_->createConcat("encoder."+std::to_string(i)+".concat",
+				{opphiddenOut0NV, hiddenOut0NV},1));
+	}
+
+	// ---------------- end Bi-Directional LSTM --------------
+
+	F_->createLSTM(bindings,"encoder.lstm1",lstm0Concat ,
+			batchSize_, /* 2(?)*/HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
 	for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
 		hiddenOut1.push_back(hidenOutputs1[i].getNode());
 	}
 
-	F_->createLSTM(bindings,"encoder.lstm2.",hiddenOut1 ,
+	F_->createLSTM(bindings,"encoder.lstm2",hiddenOut1 ,
 			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs2);
 	for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
 		hiddenOut2.push_back(hidenOutputs2[i].getNode());
@@ -159,19 +193,26 @@ void Model::loadEncoder(){
 		Node *add1 = F_->createAdd("encoder."+std::to_string(i)+".residual.",hidenOutputs2[i], hidenOutputs1[i]);
 		hiddenOut3.push_back(add1);
 	}
-	F_->createLSTM(bindings,"encoder.lstm3.",hiddenOut3 ,
+	F_->createLSTM(bindings,"encoder.lstm3",hiddenOut3 ,
 			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs3);
+
+	GLOW_ASSERT(hidenOutputs3.size() == hiddenOut3.size() && "LSTM outputs doesn't align");
+	for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
+		Node *add2 = F_->createAdd("encoder."+std::to_string(i)+".residual1.",hiddenOut3[i], hidenOutputs3[i]);
+		NodeValue add2NV(add2);
+		encOut.push_back(add2NV);
+	}
 
 	hidenOutputs0.clear();
 	hidenOutputs1.clear();
 	hidenOutputs2.clear();
+	hidenOutputs3.clear();
 	hiddenOut0.clear();
 	hiddenOut1.clear();
 	hiddenOut2.clear();
 	hiddenOut3.clear();
 
-	Node *output = F_->createConcat("encoder.output", hidenOutputs3, 1);
-	hidenOutputs3.clear();
+	Node *output = F_->createConcat("encoder.output", encOut, 1);
 	// TODO: maybe no need here the reshape concat 3rd arg is dimension
 	encoderHiddenOutput_ = F_->createReshape("encoder.output.reshape", output,
 			{batchSize_, MAX_LENGTH , HIDDEN_SIZE});
@@ -258,9 +299,16 @@ std::vector<Node *> Model::loadAttention(std::vector<Node *> AttentionQuery){
 				Bua , {batchSize_, 1 , HIDDEN_SIZE} , 2);
 		Node *AddQuery = F_->createAdd("attention.addquery", BroadQuery, BroadForQureAdd);
 		debug_size_print(AddQuery);
-
+		auto vect = [](Node *AddQuery)
+		{
+			std::vector<NodeValue> vec;
+			for (uint i=0 ; i < MAX_LENGTH ; i++){
+			vec.push_back(AddQuery);
+			}
+			return vec;
+		};
 		//TODO: pass to the concat none hardcoded length
-		Node *copyQuery = F_->createConcat("attention.concatquery",{AddQuery,AddQuery,AddQuery},1);
+		Node *copyQuery = F_->createConcat("attention.concatquery",vect(AddQuery),1);
 		debug_size_print(copyQuery);
 		Node *THinside = F_->createTanh("attention.TanH.inside" , F_->createAdd (
 				"attention.add." + std::to_string(i) + ".inside", AddKeys, copyQuery));
@@ -291,7 +339,7 @@ void Model::loadDecoder(){
 	std::vector<Node *> dec_seq;
 	for (uint i=0 ; i < MAX_LENGTH ; i++){
 		Placeholder *hiddenInit = mod.createPlaceholder(ElemKind::FloatTy,
-				{batchSize_, EMBEDDING_SIZE}, "decoder."+std::to_string(i)+".hiddenInit", false);
+				{batchSize_, HIDDEN_SIZE}, "decoder."+std::to_string(i)+".hiddenInit", false);
 		bindings.allocate(hiddenInit)->zero();
 		Node *seqInit = hiddenInit;
 		dec_seq.push_back(seqInit);
@@ -312,51 +360,99 @@ void Model::loadDecoder(){
 
 	for (uint word_inx=0 ; word_inx < MAX_LENGTH; word_inx++){
 		std::printf("***************** word_ind %u***************\n", word_inx);
+
+		// lstm 0
 		F_->createLSTM(bindings, "decoder.lstm.0."+std::to_string(word_inx), dec_seq ,
 				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs0);
 		for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
 			hiddenOut0.push_back(hidenOutputs0[i].getNode());
 		}
 
+		std::vector<Node *> currentOut;
+		// attention
 		std::vector<Node *> attentionOut = loadAttention(hiddenOut0);
 		for (uint i=0 ; i < hiddenOut0.size() ; i++){
 			NodeValue attentionOutNV(attentionOut[i]);
 			debug_size_print(attentionOutNV);
 			NodeValue hiddenOut0NV(hiddenOut0[i]);
 			debug_size_print(hiddenOut0NV);
-			attentionOut[i] = F_->createConcat("decoder."+std::to_string(i)+".concat",
-					{attentionOutNV, hiddenOut0NV},1);
+		//concat 0
+			currentOut.push_back(F_->createConcat("decoder."+std::to_string(i)+".concat",
+					{attentionOutNV, hiddenOut0NV},1));
 		}
 
-		F_->createLSTM(bindings, "decoder.lstm.1."+std::to_string(word_inx), attentionOut ,
-				batchSize_, /* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs1);
+		// lstm 1
+		F_->createLSTM(bindings, "decoder.lstm.1."+std::to_string(word_inx), currentOut ,
+				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
 		for (uint i = 0 ; i < hidenOutputs1.size() ; i++){
 			hiddenOut1.push_back(hidenOutputs1[i].getNode());
 		}
 
-		F_->createLSTM(bindings, "decoder.lstm.2."+std::to_string(word_inx), hiddenOut1 ,
-				batchSize_, /* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs2);
+		currentOut.clear();
+		for (uint i=0 ; i < hiddenOut1.size() ; i++){
+			NodeValue attentionOutNV(attentionOut[i]);
+			debug_size_print(attentionOutNV);
+			NodeValue hiddenOut1NV(hiddenOut1[i]);
+			debug_size_print(hiddenOut1NV);
+		// concat 1  - concat lstm1 with attentionout
+			currentOut.push_back(F_->createConcat("decoder."+std::to_string(i)+".concat",
+					{attentionOutNV, hiddenOut1NV},1));
+		}
+
+		//lstm 2
+		F_->createLSTM(bindings, "decoder.lstm.2."+std::to_string(word_inx), currentOut ,
+				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs2);
 		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
 			hiddenOut2.push_back(hidenOutputs2[i].getNode());
 		}
-
-		GLOW_ASSERT(hidenOutputs2.size() == hidenOutputs1.size() && "LSTM outputs doesn't align");
-		for (uint i = 0 ; i < hidenOutputs2.size() ; i++){
-			Node *add1 = F_->createAdd("decoder."+std::to_string(i)+".residual",hidenOutputs2[i], hidenOutputs1[i]);
-			hiddenOut3.push_back(add1);
+		// add residual 0 - lstm2 + attention-out
+		std::vector<Node *> addResidual1;
+		for (uint i=0 ; i < hiddenOut2.size() ; i++){
+			addResidual1.push_back(F_->createAdd("add.residual1."+std::to_string(i),
+					hiddenOut1[i] , hiddenOut2[i]));
 		}
-		F_->createLSTM(bindings, "decoder.lstm.3."+std::to_string(word_inx), hiddenOut3 , batchSize_,
-				/* 2*/HIDDEN_SIZE , EMBEDDING_SIZE, hidenOutputs3);
+
+		currentOut.clear();
+		for (uint i=0 ; i < addResidual1.size() ; i++){
+			NodeValue attentionOutNV(attentionOut[i]);
+			debug_size_print(attentionOutNV);
+			NodeValue hiddenOut2NV(addResidual1[i]);
+			debug_size_print(hiddenOut2NV);
+		// concat 2 - concat addResidual1 with attentionout
+			currentOut.push_back(F_->createConcat("decoder."+std::to_string(i)+".concat",
+					{attentionOutNV, hiddenOut2NV},1));
+		}
+
+		// lstm 3
+		F_->createLSTM(bindings, "decoder.lstm.3."+std::to_string(word_inx), currentOut , batchSize_,
+				 HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs3);
+		for (uint i = 0 ; i < hidenOutputs3.size() ; i++){
+			hiddenOut3.push_back(hidenOutputs3[i].getNode());
+		}
+
+		// add residual 1 - LSTM2 + LSTM3
+		std::vector<Node *> addResidual2;
+		for (uint i=0 ; i < hiddenOut3.size() ; i++){
+			addResidual2.push_back(F_->createAdd("add.residual2."+std::to_string(i),
+					addResidual1[i] , hiddenOut3[i]));
+		}
 
 		hidenOutputs0.clear();
 		hidenOutputs1.clear();
 		hidenOutputs2.clear();
-		hiddenOut0.clear(); hiddenOut1.clear(); hiddenOut2.clear(); hiddenOut3.clear();
-		// TODO: think how to avoid the last allocation for dec_seq
-		if (word_inx+1 < MAX_LENGTH){
-			dec_seq[word_inx+1] = hidenOutputs3[word_inx];
-		}
 		hidenOutputs3.clear();
+		hiddenOut0.clear(); hiddenOut1.clear(); hiddenOut2.clear(); hiddenOut3.clear();
+		addResidual1.clear();
+		// TODO: think how to avoid the last allocation for dec_seq
+
+		// classifier
+		// softmax
+		// topk
+		if (word_inx+1 < MAX_LENGTH){
+			dec_seq[word_inx+1] = addResidual2[word_inx];
+		}
+		addResidual2.clear();
+
 
 	}
 	std::vector<NodeValue> lstmOutput;
@@ -430,8 +526,9 @@ Placeholder *Model::loadEmbedding(llvm::StringRef langPrefix, size_t langSize) {
 	  auto *result =
 			  mod.createPlaceholder(ElemKind::FloatTy, {langSize, EMBEDDING_SIZE},
 					  "embedding." + langPrefix.str(), false);
+	  auto test = bindings.allocate(result);
 	  loadMatrixFromFile("en2gr/" + langPrefix.str() + "_embedding.bin",
-                       *bindings.allocate(result));
+                       *test);
 
 	  return result;
 }
@@ -477,4 +574,8 @@ void Model::compile() {
                                              {input_, seqLength_, output_});
     }
     EE_.compile(CompilationMode::Infer, F_);
+	for (auto &node : F_->getNodes()){
+		std::string name = node.getName();
+		std::cout << "the Node name is: "<< name.c_str() << std::endl;
+	}
 }

@@ -20,8 +20,8 @@ int main(int argc, char **argv){
 
 	Model seq2seq(batchSizeOpt);
 	seq2seq.loadLanguages();
+	//seq2seq.loadTokens();
 	seq2seq.loadEncoder();
-	//seq2seq.loadAttention();
 	seq2seq.loadDecoder();
 	seq2seq.compile();
 

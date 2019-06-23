@@ -30,6 +30,8 @@ const unsigned DECODER_LSTMS_NUM = 4;
 const unsigned MAX_LENGTH = 3;
 const unsigned EMBEDDING_SIZE =/* 256;*/  1024;
 const unsigned HIDDEN_SIZE = /*EMBEDDING_SIZE * 3;*/ 1024;
+const uint LSTM_LEVELS = 4;
+const std::string files_indices[LSTM_LEVELS] = {"f" , "i" , "o" , "c" };
 
 
 extern llvm::cl::opt<BackendKind> ExecutionBackend;
@@ -92,6 +94,8 @@ private:
   Node *attetionOutput_;
 
   Placeholder *loadEmbedding(llvm::StringRef langPrefix, size_t langSize);
+  void loadEncoderWieghts();
+  void loadEncoderBiases();
 };
 
 

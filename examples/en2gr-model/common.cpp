@@ -102,12 +102,12 @@ void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
 }
 
 /// Loads tensor of floats from binary file.
-void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *> result, int numOfSlices) {
+void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *> result, uint numOfSlices) {
   std::ifstream file(filename.str(), std::ios::binary);
   assert(file.is_open() == true);
   metadata meta;
   meta.read_from_file(file);
-  for (int i = 0 ; i < numOfSlices ; ++i){
+  for (uint i = 0 ; i < numOfSlices ; ++i){
 	  if (!file.read(result[i]->getPayload().getUnsafePtr(), meta.m_size[0]/numOfSlices * sizeof(float))) {
 		  std::cout << "Error: only " << file.gcount() << " could be read\n";
 		  std::cout << "Error reading file: " << filename.str() << '\n'

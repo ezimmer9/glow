@@ -128,7 +128,7 @@ void Model::loadEncoder(){
 	}
 
 	// Bi-Directional LSTM.
-	F_->createLSTM(bindings, "encoder.lstm", enc_seq ,
+	F_->createLSTM(bindings, "encoder.lstm0", enc_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
 	for (uint i = 0 ; i < hidenOutputs0.size() ; i++){
 		hiddenOut0.push_back(hidenOutputs0[i].getNode());
@@ -558,6 +558,102 @@ Placeholder *Model::loadEmbedding(llvm::StringRef langPrefix, size_t langSize) {
 	  return result;
 }
 
+void Model::loadEncoderWieghts(){
+	auto mod = F_->getParent();
+    ConstList consts = F_->findConstants();
+    for (auto con : consts){
+    	std::cout << "constant: " << con->getName().str ()<< "\n";
+    }
+    std::vector<Constant *> ConstVecH, ConstVecX;
+	std::vector<Constant *> ConstVecOppH, ConstVecOppX;
+    for (uint j = 0 ; j < ENCODER_LSTMS_NUM ; ++j)
+    {
+		for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
+		{
+			std::string const_name_h = "encoder_lstm"+ std::to_string(j) +"_Wh" + files_indices[i]+"1";
+			std::string const_name_x = "encoder_lstm"+ std::to_string(j) +"_Wx" + files_indices[i]+"1";
+			Constant *ConstH = mod->getConstantByName(const_name_h);
+			Constant *ConstX = mod->getConstantByName(const_name_x);
+			ConstVecH.push_back(ConstH);
+			ConstVecX.push_back(ConstX);
+			if (j == 0 ){
+				std::string const_name_opp_h = "encoder_opp_lstm_Wh" + files_indices[i] +"1";
+				std::string const_name_opp_x = "encoder_opp_lstm_Wx" + files_indices[i] +"1";
+				Constant *ConstOppH = mod->getConstantByName(const_name_opp_h);
+				Constant *ConstOppX = mod->getConstantByName(const_name_opp_x);
+				ConstVecOppH.push_back(ConstOppH);
+				ConstVecOppX.push_back(ConstOppX);
+
+			}
+		}
+	   	loadMatrixAndSplitFromFile(
+	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_hh_l0.bin" ,
+				ConstVecH , LSTM_LEVELS);
+	   	ConstVecH.clear();
+	   	loadMatrixAndSplitFromFile(
+	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_ih_l0.bin" ,
+				ConstVecX , LSTM_LEVELS);
+	   	ConstVecX.clear();
+	   	if (j == 0){
+	   		loadMatrixAndSplitFromFile(
+		   			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
+					ConstVecOppH , LSTM_LEVELS);
+		   	ConstVecOppH.clear();
+		   	loadMatrixAndSplitFromFile(
+		   			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
+					ConstVecOppX , LSTM_LEVELS);
+		   	ConstVecOppX.clear();
+	   	}
+    }
+
+}
+
+void Model::loadEncoderBiases(){
+	auto mod = F_->getParent();
+    std::vector<Constant *> ConstVecHb, ConstVecXb;
+	std::vector<Constant *> ConstVecOppHb, ConstVecOppXb;
+    for (uint j = 0 ; j < ENCODER_LSTMS_NUM ; ++j)
+    {
+		for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
+		{
+			std::string const_name_h_b = "encoder_lstm"+ std::to_string(j) +"_b" + files_indices[i]+"11";
+			std::string const_name_x_b = "encoder_lstm"+ std::to_string(j) +"_b" + files_indices[i]+"21";
+			Constant *ConstHb = mod->getConstantByName(const_name_h_b);
+			Constant *ConstXb = mod->getConstantByName(const_name_x_b);
+			ConstVecHb.push_back(ConstHb);
+			ConstVecXb.push_back(ConstXb);
+			if (j == 0 ){
+				std::string const_name_opp_h_b = "encoder_opp_lstm_b" + files_indices[i] +"11";
+				std::string const_name_opp_x_b = "encoder_opp_lstm_b" + files_indices[i] +"21";
+				Constant *ConstOppHb = mod->getConstantByName(const_name_opp_h_b);
+				Constant *ConstOppXb = mod->getConstantByName(const_name_opp_x_b);
+				ConstVecOppHb.push_back(ConstOppHb);
+				ConstVecOppXb.push_back(ConstOppXb);
+
+			}
+		}
+	   	loadMatrixAndSplitFromFile(
+	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".bias_hh_l0.bin" ,
+				ConstVecHb , LSTM_LEVELS);
+	   	ConstVecHb.clear();
+	   	loadMatrixAndSplitFromFile(
+	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".bias_ih_l0.bin" ,
+				ConstVecXb , LSTM_LEVELS);
+	   	ConstVecXb.clear();
+	   	if (j == 0){
+	   		loadMatrixAndSplitFromFile(
+		   			"en2gr/encoder.rnn_layers.0.bias_hh_l0_reverse.bin" ,
+					ConstVecOppHb , LSTM_LEVELS);
+		   	ConstVecOppHb.clear();
+		   	loadMatrixAndSplitFromFile(
+		   			"en2gr/encoder.rnn_layers.0.bias_ih_l0_reverse.bin" ,
+					ConstVecOppXb , LSTM_LEVELS);
+		   	ConstVecOppXb.clear();
+	   	}
+    }
+
+}
+
 void Model::compile() {
 	std::printf("*** compile ***\n\n");
     if (!dumpProfileFileOpt.empty()) {
@@ -598,5 +694,7 @@ void Model::compile() {
       ::glow::convertPlaceholdersToConstants(F_, bindings,
                                              {input_, output_});
     }
+    loadEncoderWieghts();
+    loadEncoderBiases();
     EE_.compile(CompilationMode::Infer, F_);
 }

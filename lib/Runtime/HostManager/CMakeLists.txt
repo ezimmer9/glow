@@ -6,14 +6,7 @@ target_link_libraries(HostManager
                         Backends
                         Base
                         Graph
-                        Optimizer
+                        GraphOptimizer
                         Partitioner
                         Provisioner
-                        Executor
-                        DeviceManager)
-
-if (GLOW_WITH_CPU)
-  target_link_libraries(HostManager
-                        PRIVATE
-                          CPUDeviceManager)
-endif()
+                        Executor)

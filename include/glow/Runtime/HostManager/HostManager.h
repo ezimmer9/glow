@@ -15,7 +15,7 @@
  */
 #ifndef GLOW_RUNTIME_HOSTMANAGERR_HOSTMANAGER_H
 #define GLOW_RUNTIME_HOSTMANAGERR_HOSTMANAGER_H
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 #include "glow/Backends/DeviceManager.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Runtime/RuntimeTypes.h"
@@ -45,6 +45,10 @@ class HostManager final {
     // Module that was used to create this network. Everything except
     // placeholders and types have been removed from it.
     std::shared_ptr<Module> module;
+
+    /// use an atomic refcount rather than just store a shared_ptr for thread
+    /// safety.
+    std::atomic<size_t> refcount;
   };
 
   /// Count of current in-flight networks being run. Atomic to allow
@@ -55,10 +59,8 @@ class HostManager final {
   /// concurrency in runNetwork.
   std::atomic<size_t> totalRequestCount_{0};
 
-  /// Limit maximum count of networks run at once. Hardcoded for now this
-  /// should be a configurable value. Above this limit the HostManager will
-  /// refuse additional request and return Failed.
-  const unsigned int activeRequestLimit_ = 100;
+  /// Configuration parameters for this Runtime Host.
+  const HostConfig config_{};
 
   /// A map from a networkName to a network, which is represented by struct DAG.
   std::unordered_map<std::string, NetworkData> networks_;
@@ -75,31 +77,39 @@ class HostManager final {
   /// appropriate device managers for an inference request.
   std::unique_ptr<Executor> executor_;
 
-  /// Backend pointer. This allows the HostManager to optimize functions before
-  /// they are passed to the Partitioner. It is just one since we are currently
-  /// assuming a homogenous set of devices. This may get moved into the
-  /// Partitioner at a later point.
-  std::unique_ptr<Backend> backend_;
-
   /// The provisioner owns the compiledFunctions and handles loading functions
   /// onto the devices.
   std::unique_ptr<Provisioner> provisioner_;
 
 public:
+  /// Default constructor.
+  HostManager() = default;
+
+  /// Constructor that takes configuration options.
+  HostManager(const HostConfig &hostConfig);
+
+  /// Constructor that takes a list of Devices to use.
+  HostManager(std::vector<std::unique_ptr<DeviceConfig>> deviceConfigs);
+
+  /// Constructor that takes both Devices and the configuration.
+  HostManager(std::vector<std::unique_ptr<DeviceConfig>> deviceConfigs,
+              const HostConfig &hostConfig);
+
   /// Adds the network to the host and does the necessary setup work. This
   /// includes partitioning, provisioning, compiling and initializing
-  /// backends. Additionally DAGs are created for each function and stored
-  /// in networks_. Returns an llvm::Error containing the results of the
+  /// backends. Additionally DAGs are created for each function and stored in
+  /// networks_. \returns an llvm::Error containing the results of the
   /// operation. This function consumes the \p module so any pointers to data
-  /// contained within the module should be considered invalid. If \p
-  /// saturateHost is set to true the HostManager will try to use all available
-  /// devices on the host.
+  /// contained within the module should be considered invalid. The function is
+  /// optimized based on \p cctx. If \p saturateHost is set to true the
+  /// HostManager will try to use all available devices on the host.
   llvm::Error addNetwork(std::unique_ptr<Module> module,
-                         bool saturateHost = false);
+                         CompilationContext &cctx, bool saturateHost = false);
 
   /// Given \p networkName removes that network from the host. This also
   /// removes the network from any backends setup to execute it.
-  void removeNetwork(llvm::StringRef networkName);
+  /// \returns an llvm::Error indicating success or failure of the operation.
+  llvm::Error removeNetwork(llvm::StringRef networkName);
 
   /// Returns true if \p networkName is already added to the host.
   bool networkAdded(llvm::StringRef networkName);
@@ -117,8 +127,13 @@ public:
   RunIdentifierTy runNetwork(llvm::StringRef networkName,
                              std::unique_ptr<ExecutionContext> context,
                              ResultCBTy callback);
-  HostManager(std::vector<std::unique_ptr<DeviceConfig>> configs);
 
+  /// A wrapper around runNetwork that provides a blocking interface for an
+  /// inference request. Runs the network provided in \p networkName using \p
+  /// bindings for placeholder bindings. \returns an llvm::Error indicating
+  /// success or failure.
+  llvm::Error runNetworkBlocking(llvm::StringRef networkName,
+                                 PlaceholderBindings &bindings);
   /// Initialize the HostManager with the given \p configs creating one
   /// DeviceManager for each config listed.
   llvm::Error init(std::vector<std::unique_ptr<DeviceConfig>> configs);

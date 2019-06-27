@@ -18,8 +18,10 @@
 #include "glow/Backends/DummyDeviceManager.h"
 
 #include "../../lib/Backends/CPU/CPUDeviceManager.h"
+#include "../../lib/Backends/Interpreter/InterpreterDeviceManager.h"
 #include "glow/ExecutionEngine/ExecutionEngine.h"
-#include "glow/Optimizer/Optimizer.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
+#include "glow/Runtime/RuntimeTypes.h"
 
 #include "gtest/gtest.h"
 
@@ -29,11 +31,19 @@
 using namespace glow;
 using namespace glow::runtime;
 
-class DeviceManagerTest : public ::testing::TestWithParam<BackendKind> {
+class DeviceManagerTest : public ::testing::TestWithParam<std::string> {
 public:
-  void SetUp() override { backendKind = GetParam(); }
+  void SetUp() override {
+    backendName = GetParam();
+    device.reset(DeviceManager::createDeviceManager(DeviceConfig(backendName)));
+    ASSERT_TRUE(device.get());
+    ASSERT_FALSE(errToBool(device->init()));
+  }
 
-  BackendKind backendKind;
+  void TearDown() override { EXPECT_FALSE(errToBool(device->stop())); }
+
+  std::string backendName;
+  std::unique_ptr<DeviceManager> device{nullptr};
 };
 
 std::unique_ptr<Module> makeBasicModule(std::string functionName = "main") {
@@ -44,22 +54,22 @@ std::unique_ptr<Module> makeBasicModule(std::string functionName = "main") {
                                           functionName + "_input", false);
   auto *output = module->createPlaceholder(ElemKind::FloatTy, {1},
                                            functionName + "_output", false);
-  auto *p = F->createPow("pow2", input, 2.0f);
+  auto *p = F->createTanh("tanh2", input);
   F->createSave("ret", p, output);
 
   return module;
 }
 
 FunctionMapTy
-compileFunctions(BackendKind backendKind, Module *module,
+compileFunctions(llvm::StringRef backendName, Module *module,
                  std::vector<std::unique_ptr<CompiledFunction>> &backing) {
   FunctionMapTy results;
-  auto *backend = createBackend(backendKind);
+  auto *backend = createBackend(backendName);
   CompilationContext cctx;
-  cctx.mode = CompilationMode::Infer;
+  cctx.compMode = CompilationMode::Infer;
   for (auto *F : module->getFunctions()) {
-    ::glow::optimizeFunction(F, *backend, cctx);
-    auto f = backend->compile(F, cctx.backendOpts);
+    EXIT_ON_ERR(::glow::optimizeFunction(F, *backend, cctx));
+    auto f = EXIT_ON_ERR(backend->compile(F, cctx.backendOpts));
     backing.push_back(std::move(f));
     results.emplace(F->getName(), backing.back().get());
   }
@@ -85,10 +95,7 @@ TEST_P(DeviceManagerTest, Basic) {
   auto module = makeBasicModule();
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions =
-      compileFunctions(backendKind, module.get(), backing);
-
-  auto *device = DeviceManager::createDeviceManager(backendKind);
-  ASSERT_FALSE(errToBool(device->init()));
+      compileFunctions(backendName, module.get(), backing);
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -108,8 +115,8 @@ TEST_P(DeviceManagerTest, Basic) {
 
   Tensor input1(ElemKind::FloatTy, {1});
   Tensor output1(ElemKind::FloatTy, {1});
-  input1.getHandle().clear(2);
-  output1.getHandle().clear(4);
+  input1.getHandle().clear(0.5);
+  output1.getHandle().clear(std::tanh(0.5));
 
   updateInputPlaceholders(*context->getPlaceholderBindings(),
                           {module->getPlaceholderByName("main_input")},
@@ -134,18 +141,81 @@ TEST_P(DeviceManagerTest, Basic) {
       module->getPlaceholderByName("main_output"));
   ASSERT_TRUE(result1);
   EXPECT_TRUE(result1->isEqual(output1));
+}
 
-  EXPECT_FALSE(errToBool(device->stop()));
-  delete device;
+// Test that the DeviceManager correctly supports virtual padding.
+TEST_P(DeviceManagerTest, PartialTensorCopy) {
+  // Temporarily disable this test for Habana.
+  if (backendName == "Habana") {
+    return;
+  }
+  std::unique_ptr<Module> module = llvm::make_unique<Module>();
+
+  // Create function of batch size 2.
+  Function *F = module->createFunction("main");
+  auto *input =
+      module->createPlaceholder(ElemKind::FloatTy, {2}, "main_input", false);
+  auto *output =
+      module->createPlaceholder(ElemKind::FloatTy, {2}, "main_output", false);
+  auto *p = F->createTanh("tanh2", input);
+  F->createSave("ret", p, output);
+
+  std::vector<std::unique_ptr<CompiledFunction>> backing;
+  FunctionMapTy functions =
+      compileFunctions(backendName, module.get(), backing);
+
+  std::promise<const Module *> promise;
+  std::future<const Module *> future;
+  std::tie(promise, future) = getFutureHelper<const Module *>();
+
+  device->addNetwork(module.get(), std::move(functions),
+                     [&promise](const Module *module, llvm::Error err) {
+                       callbackHelper(promise, module, std::move(err));
+                     });
+
+  future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(future.get(), module.get());
+
+  std::unique_ptr<ExecutionContext> context =
+      llvm::make_unique<ExecutionContext>();
+  context->getPlaceholderBindings()->allocate(output);
+
+  Tensor input1(ElemKind::FloatTy, {1});
+  auto size = input->getType()->getSizeInBytes() / 2;
+  Tensor *virtualPaddedInput =
+      new Tensor(input1.getUnsafePtr(), input->getType(), size);
+
+  Tensor output1(ElemKind::FloatTy, {1});
+  input1.getHandle().clear(0.5);
+  output1.getHandle().clear(std::tanh(0.5));
+
+  context->getPlaceholderBindings()->insert(input, virtualPaddedInput);
+  std::promise<std::unique_ptr<ExecutionContext>> runPromise;
+  std::future<std::unique_ptr<ExecutionContext>> runFuture;
+
+  std::tie(runPromise, runFuture) =
+      getFutureHelper<std::unique_ptr<ExecutionContext>>();
+  device->runFunction("main", std::move(context),
+                      [&runPromise](RunIdentifierTy, llvm::Error err,
+                                    std::unique_ptr<ExecutionContext> context) {
+                        callbackHelper(runPromise, std::move(context),
+                                       std::move(err));
+                      });
+
+  runFuture.wait_for(std::chrono::seconds(2));
+  context = runFuture.get();
+  ASSERT_TRUE(context);
+  Tensor *result1 = context->getPlaceholderBindings()->get(
+      module->getPlaceholderByName("main_output"));
+  ASSERT_TRUE(result1);
+  EXPECT_FLOAT_EQ(result1->getHandle().at({0}), std::tanh(0.5));
 }
 
 TEST_P(DeviceManagerTest, MultiRun) {
   auto module = makeBasicModule();
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions =
-      compileFunctions(backendKind, module.get(), backing);
-  auto *device = DeviceManager::createDeviceManager(backendKind);
-  ASSERT_FALSE(errToBool(device->init()));
+      compileFunctions(backendName, module.get(), backing);
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -171,8 +241,8 @@ TEST_P(DeviceManagerTest, MultiRun) {
 
   Tensor output1(ElemKind::FloatTy, {1});
   Tensor output2(ElemKind::FloatTy, {1});
-  output1.getHandle().clear(4.0f);
-  output2.getHandle().clear(9.0f);
+  output1.getHandle().clear(std::tanh(2.0f));
+  output2.getHandle().clear(std::tanh(3.0f));
 
   updateInputPlaceholders(*context1->getPlaceholderBindings(),
                           {module->getPlaceholderByName("main_input")},
@@ -214,9 +284,6 @@ TEST_P(DeviceManagerTest, MultiRun) {
   ASSERT_TRUE(result2);
   EXPECT_TRUE(result1->isEqual(output1));
   EXPECT_TRUE(result2->isEqual(output2));
-
-  EXPECT_FALSE(errToBool(device->stop()));
-  delete device;
 }
 
 TEST_P(DeviceManagerTest, MultiFunction) {
@@ -232,18 +299,26 @@ TEST_P(DeviceManagerTest, MultiFunction) {
   auto *inP = module->getPlaceholderByName("func1_input");
   auto *outP =
       module->createPlaceholder(ElemKind::FloatTy, {1}, "func2_output", false);
-  auto *p = F->createPow("pow3", inP, 3.0f);
+  auto *p = F->createTanh("tanh2", inP);
   F->createSave("ret2", p, outP);
+  // Add extra tanh and fcs to the second function, we do not care about it's
+  // output but this makes the two functions have different memory requirements.
+  auto *c = module->createConstant(ElemKind::FloatTy, {1}, "add_constant");
+  auto *sideTan = F->createTanh("tanh_extra", c);
+  auto *fc = F->createFullyConnected(*context2->getPlaceholderBindings(), "fc",
+                                     sideTan, 1000);
+  auto *fc2 = F->createFullyConnected(*context2->getPlaceholderBindings(),
+                                      "fc2", fc, 1);
+  auto res = F->createSave("side_save", fc2);
 
   context2->getPlaceholderBindings()->allocate(inP);
   context2->getPlaceholderBindings()->allocate(outP);
+  context2->getPlaceholderBindings()->allocate(res->getPlaceholder());
 
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions =
-      compileFunctions(backendKind, module.get(), backing);
+      compileFunctions(backendName, module.get(), backing);
   EXPECT_EQ(functions.size(), 2);
-  auto *device = DeviceManager::createDeviceManager(backendKind);
-  ASSERT_FALSE(errToBool(device->init()));
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -256,11 +331,11 @@ TEST_P(DeviceManagerTest, MultiFunction) {
   EXPECT_EQ(future.get(), module.get());
 
   Tensor input(ElemKind::FloatTy, {1});
-  input.getHandle().clear(2.0f);
+  input.getHandle().clear(0.5f);
   Tensor output1(ElemKind::FloatTy, {1});
-  output1.getHandle().clear(4.0f);
+  output1.getHandle().clear(std::tanh(0.5f));
   Tensor output2(ElemKind::FloatTy, {1});
-  output2.getHandle().clear(8.0f);
+  output2.getHandle().clear(std::tanh(0.5f));
 
   updateInputPlaceholders(*context1->getPlaceholderBindings(),
                           {module->getPlaceholderByName("func1_input")},
@@ -302,9 +377,6 @@ TEST_P(DeviceManagerTest, MultiFunction) {
   ASSERT_TRUE(result2);
   EXPECT_TRUE(result1->isEqual(output1));
   EXPECT_TRUE(result2->isEqual(output2));
-
-  EXPECT_FALSE(errToBool(device->stop()));
-  delete device;
 }
 
 TEST_P(DeviceManagerTest, MultiModule) {
@@ -313,11 +385,9 @@ TEST_P(DeviceManagerTest, MultiModule) {
 
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions1 =
-      compileFunctions(backendKind, module1.get(), backing);
+      compileFunctions(backendName, module1.get(), backing);
   FunctionMapTy functions2 =
-      compileFunctions(backendKind, module2.get(), backing);
-  auto *device = DeviceManager::createDeviceManager(backendKind);
-  ASSERT_FALSE(errToBool(device->init()));
+      compileFunctions(backendName, module2.get(), backing);
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -341,9 +411,9 @@ TEST_P(DeviceManagerTest, MultiModule) {
       llvm::make_unique<ExecutionContext>();
   context1->getPlaceholderBindings()->allocate(module1->getPlaceholders());
   Tensor input(ElemKind::FloatTy, {1});
-  input.getHandle().clear(2.0f);
+  input.getHandle().clear(0.5f);
   Tensor output(ElemKind::FloatTy, {1});
-  output.getHandle().clear(4.0f);
+  output.getHandle().clear(std::tanh(0.5f));
 
   updateInputPlaceholders(*context1->getPlaceholderBindings(),
                           {module1->getPlaceholderByName("func1_input")},
@@ -390,9 +460,6 @@ TEST_P(DeviceManagerTest, MultiModule) {
       module2->getPlaceholderByName("func2_output"));
   ASSERT_TRUE(result2);
   EXPECT_TRUE(result2->isEqual(output));
-
-  EXPECT_FALSE(errToBool(device->stop()));
-  delete device;
 }
 
 TEST_P(DeviceManagerTest, ReuseModule) {
@@ -408,7 +475,7 @@ TEST_P(DeviceManagerTest, ReuseModule) {
   auto *inP = module->getPlaceholderByName("func1_input");
   auto *outP =
       module->createPlaceholder(ElemKind::FloatTy, {1}, "func2_output", false);
-  auto *p = F->createPow("pow3", inP, 3.0f);
+  auto *p = F->createTanh("tanh2", inP);
   F->createSave("ret2", p, outP);
 
   context2->getPlaceholderBindings()->allocate(inP);
@@ -416,7 +483,7 @@ TEST_P(DeviceManagerTest, ReuseModule) {
 
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions =
-      compileFunctions(backendKind, module.get(), backing);
+      compileFunctions(backendName, module.get(), backing);
   EXPECT_EQ(functions.size(), 2);
 
   // Split the function map into two parts.
@@ -425,8 +492,6 @@ TEST_P(DeviceManagerTest, ReuseModule) {
   functions.erase("func2");
   EXPECT_EQ(functions.size(), 1);
   EXPECT_EQ(functions2.size(), 1);
-  auto *device = DeviceManager::createDeviceManager(backendKind);
-  ASSERT_FALSE(errToBool(device->init()));
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -447,11 +512,11 @@ TEST_P(DeviceManagerTest, ReuseModule) {
   EXPECT_EQ(future.get(), module.get());
 
   Tensor input(ElemKind::FloatTy, {1});
-  input.getHandle().clear(2.0f);
+  input.getHandle().clear(0.5f);
   Tensor output1(ElemKind::FloatTy, {1});
-  output1.getHandle().clear(4.0f);
+  output1.getHandle().clear(std::tanh(0.5f));
   Tensor output2(ElemKind::FloatTy, {1});
-  output2.getHandle().clear(8.0f);
+  output2.getHandle().clear(std::tanh(0.5f));
 
   updateInputPlaceholders(*context1->getPlaceholderBindings(),
                           {module->getPlaceholderByName("func1_input")},
@@ -494,9 +559,20 @@ TEST_P(DeviceManagerTest, ReuseModule) {
       module->getPlaceholderByName("func2_output"));
   ASSERT_TRUE(result2);
   EXPECT_TRUE(result2->isEqual(output2));
+}
 
-  EXPECT_FALSE(errToBool(device->stop()));
-  delete device;
+TEST(DeviceManagerTest, SetDeviceMemory) {
+  // Test Interpreter.
+  auto interpreterConfigEmpty = DeviceConfig("Interpreter");
+  auto interpreterConfigFull = DeviceConfig("Interpreter");
+  interpreterConfigFull.setDeviceMemory(32768);
+  // Only deviceConfig setting.
+  InterpreterDeviceManager interpreterDeviceSetByDeviceConfig(
+      interpreterConfigFull);
+  EXPECT_EQ(interpreterDeviceSetByDeviceConfig.getMaximumMemory(), 32768);
+  // No setting at all, default memory size.
+  InterpreterDeviceManager interpreterDeviceDefault(interpreterConfigEmpty);
+  EXPECT_EQ(interpreterDeviceDefault.getMaximumMemory(), 2000000000);
 }
 
 #ifdef GLOW_WITH_CPU
@@ -505,7 +581,10 @@ TEST(DeviceManagerTest, AvailableMemory) {
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   std::promise<const Module *> promise;
   std::future<const Module *> future;
-  CPUDeviceManager cpuCoreDevice(nullptr, 1);
+
+  auto config = DeviceConfig("CPU");
+  config.setDeviceMemory(1);
+  CPUDeviceManager cpuCoreDevice(config);
   ASSERT_FALSE(errToBool(cpuCoreDevice.init()));
 
   uint64_t expectedBytes = 1;
@@ -516,11 +595,11 @@ TEST(DeviceManagerTest, AvailableMemory) {
 
   auto module = makeBasicModule();
   std::tie(promise, future) = getFutureHelper<const Module *>();
-  cpuCoreDevice.addNetwork(
-      module.get(), compileFunctions(BackendKind::CPU, module.get(), backing),
-      [&promise](const Module *module, llvm::Error err) {
-        callbackHelper(promise, module, std::move(err));
-      });
+  cpuCoreDevice.addNetwork(module.get(),
+                           compileFunctions("CPU", module.get(), backing),
+                           [&promise](const Module *module, llvm::Error err) {
+                             callbackHelper(promise, module, std::move(err));
+                           });
 
   future.wait_for(std::chrono::seconds(2));
   EXPECT_EQ(future.get(), module.get());
@@ -533,11 +612,11 @@ TEST(DeviceManagerTest, AvailableMemory) {
   // Let's try again.
   auto module2 = makeBasicModule();
   std::tie(promise, future) = getFutureHelper<const Module *>();
-  cpuCoreDevice.addNetwork(
-      module2.get(), compileFunctions(BackendKind::CPU, module2.get(), backing),
-      [&promise](const Module *module, llvm::Error err) {
-        callbackHelper(promise, module, std::move(err));
-      });
+  cpuCoreDevice.addNetwork(module2.get(),
+                           compileFunctions("CPU", module2.get(), backing),
+                           [&promise](const Module *module, llvm::Error err) {
+                             callbackHelper(promise, module, std::move(err));
+                           });
 
   future.wait_for(std::chrono::seconds(2));
   auto *resultModule = future.get();
@@ -561,11 +640,11 @@ TEST(DeviceManagerTest, AvailableMemory) {
 
   // And try again, this time with available space.
   std::tie(promise, future) = getFutureHelper<const Module *>();
-  cpuCoreDevice.addNetwork(
-      module2.get(), compileFunctions(BackendKind::CPU, module2.get(), backing),
-      [&promise](const Module *module, llvm::Error err) {
-        callbackHelper(promise, module, std::move(err));
-      });
+  cpuCoreDevice.addNetwork(module2.get(),
+                           compileFunctions("CPU", module2.get(), backing),
+                           [&promise](const Module *module, llvm::Error err) {
+                             callbackHelper(promise, module, std::move(err));
+                           });
 
   future.wait_for(std::chrono::seconds(2));
   EXPECT_EQ(future.get(), module2.get());
@@ -574,16 +653,27 @@ TEST(DeviceManagerTest, AvailableMemory) {
   EXPECT_EQ(cpuCoreDevice.getAvailableMemory(), 0);
 
   EXPECT_FALSE(errToBool(cpuCoreDevice.stop()));
+
+  // Test CPU DeviceConfig.
+  auto cpuConfigEmpty = DeviceConfig("CPU");
+  auto cpuConfigFull = DeviceConfig("CPU");
+  cpuConfigFull.setDeviceMemory(32768);
+  // Only deviceConfig setting.
+  CPUDeviceManager cpuDeviceSetByDeviceConfig(cpuConfigFull);
+  EXPECT_EQ(cpuDeviceSetByDeviceConfig.getMaximumMemory(), 32768);
+  // No setting at all, default memory size.
+  CPUDeviceManager cpuDeviceDefault(cpuConfigEmpty);
+  EXPECT_EQ(cpuDeviceDefault.getMaximumMemory(), 2000000000);
 }
 
 TEST(DeviceManagerTest, DummyDeviceManager) {
-  DummyDeviceManager deviceManager(BackendKind::Interpreter);
+  DummyDeviceManager deviceManager{DeviceConfig("Interpreter")};
   ASSERT_FALSE(errToBool(deviceManager.init()));
 
   auto module = makeBasicModule();
   std::vector<std::unique_ptr<CompiledFunction>> backing;
   FunctionMapTy functions =
-      compileFunctions(BackendKind::Interpreter, module.get(), backing);
+      compileFunctions("Interpreter", module.get(), backing);
 
   std::promise<const Module *> promise;
   std::future<const Module *> future;
@@ -601,8 +691,8 @@ TEST(DeviceManagerTest, DummyDeviceManager) {
 
   Tensor input1(ElemKind::FloatTy, {1});
   Tensor output1(ElemKind::FloatTy, {1});
-  input1.getHandle().clear(2.0f);
-  output1.getHandle().clear(4.0f);
+  input1.getHandle().clear(0.5f);
+  output1.getHandle().clear(std::tanh(0.5f));
 
   updateInputPlaceholders(*context1->getPlaceholderBindings(),
                           {module->getPlaceholderByName("main_input")},
@@ -636,14 +726,16 @@ TEST(DeviceManagerTest, DummyDeviceManager) {
 #endif // GLOW_WITH_CPU
 
 INSTANTIATE_TEST_CASE_P(Interpreter, DeviceManagerTest,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(CPU, DeviceManagerTest,
-                        ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(CPU, DeviceManagerTest, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU
 
 #ifdef GLOW_WITH_OPENCL
-INSTANTIATE_TEST_CASE_P(OpenCL, DeviceManagerTest,
-                        ::testing::Values(BackendKind::OpenCL));
-#endif
+INSTANTIATE_TEST_CASE_P(OpenCL, DeviceManagerTest, ::testing::Values("OpenCL"));
+#endif // GLOW_WITH_OPENCL
+
+#ifdef GLOW_WITH_HABANA
+INSTANTIATE_TEST_CASE_P(Habana, DeviceManagerTest, ::testing::Values("Habana"));
+#endif // GLOW_WITH_HABANA

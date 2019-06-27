@@ -4,12 +4,14 @@ add_executable(image-classifier
 
 target_link_libraries(image-classifier
                       PRIVATE
+                        Backends
                         Base
                         Converter
                         ExecutionEngine
+                        HostManager
                         Graph
                         Importer
-                        Optimizer
+                        GraphOptimizer
                         Quantization
                         LLVMSupport)
 
@@ -19,12 +21,14 @@ add_executable(text-translator
 
 target_link_libraries(text-translator
                       PRIVATE
+                        Backends
                         Base
                         Converter
                         Graph
+                        HostManager
                         Importer
                         ExecutionEngine
-                        Optimizer
+                        GraphOptimizer
                         Quantization
                         LLVMSupport)
 
@@ -34,11 +38,13 @@ add_executable(model-runner
 
 target_link_libraries(model-runner
                       PRIVATE
+                        Backends
                         Base
                         Converter
                         Graph
+                        HostManager
                         Importer
                         ExecutionEngine
-                        Optimizer
+                        GraphOptimizer
                         Quantization
                         LLVMSupport)

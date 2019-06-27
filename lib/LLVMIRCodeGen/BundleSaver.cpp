@@ -34,6 +34,8 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <glog/logging.h>
+
 #define DEBUG_TYPE "jit"
 
 using namespace glow;
@@ -47,8 +49,9 @@ BundleSaver::BundleSaver(const IRFunction *F, const LLVMBackend &llvmBackend)
 void BundleSaver::saveWeights(llvm::StringRef weightsFileName) {
   std::error_code EC;
   llvm::raw_fd_ostream weightsFile(weightsFileName, EC, llvm::sys::fs::F_None);
-  GLOW_ASSERT(!EC &&
-              "Could not open the output file for saving the bundle weights");
+  CHECK(!EC) << "Could not open the output file for saving the bundle weights "
+                "with file name: "
+             << weightsFileName.str();
   // Serialize only constant weights.
   // Do not serialize mutable weights representing inputs and outputs, because
   // it should be configurable and set by the client.
@@ -65,7 +68,9 @@ void BundleSaver::saveWeights(llvm::StringRef weightsFileName) {
       continue;
     }
     weightsFile.seek(addr);
+    CHECK(!weightsFile.has_error()) << "Could not set file write position";
     weightsFile.write(payload, numBytes);
+    CHECK(!weightsFile.has_error()) << "Could not write bytes";
     pos = addr + numBytes;
     maxPos = std::max(pos, maxPos);
   }
@@ -133,7 +138,7 @@ void BundleSaver::produceBundle(llvm::StringRef outputDir) {
   emitBundleConfig();
 
   auto &M = irgen_->getModule();
-  auto bundleName = irgen_->getMainEntryName();
+  auto bundleName = irgen_->getBundleName();
   std::string extension = (llvmCompiler.empty()) ? ".o" : ".bc";
   auto bundleCodeOutput = (outputDir + "/" + bundleName + extension).str();
   auto bundleWeightsOutput = (outputDir + "/" + bundleName + ".weights").str();
@@ -144,8 +149,9 @@ void BundleSaver::produceBundle(llvm::StringRef outputDir) {
   llvm::StringRef fileName = bundleCodeOutput;
   std::error_code EC;
   llvm::raw_fd_ostream outputFile(fileName, EC, llvm::sys::fs::F_None);
-  GLOW_ASSERT(!EC &&
-              "Could not open the output file for saving the bundle code");
+  CHECK(!EC) << "Could not open the output file for saving the bundle "
+                "code with file name: "
+             << fileName.str();
   if (fileName.endswith(".bc")) {
     // Emit the bitcode file.
     llvm::WriteBitcodeToFile(M, outputFile);
@@ -160,11 +166,8 @@ void BundleSaver::produceBundle(llvm::StringRef outputDir) {
       std::string bundleObjectCodeOutputOpt =
           " -o " + (outputDir + "/" + bundleName + ".o").str();
       cmd += bundleObjectCodeOutputOpt;
-      if (system(cmd.c_str())) {
-        llvm::errs() << "Error running external LLVM compiler:\n"
-                     << cmd << "\n";
-        GLOW_UNREACHABLE("Error running external LLVM compiler");
-      }
+      CHECK(!system(cmd.c_str()))
+          << "Error running external LLVM compiler: " << cmd;
     }
   } else if (fileName.endswith(".o")) {
     // Emit the object file.
@@ -239,10 +242,12 @@ void BundleSaver::emitBundleEntryFunction() {
 //   SymbolTableEntry *symbolTable;
 // };
 void BundleSaver::emitBundleConfig() {
-  auto symbolTable = irgen_->getModule().getGlobalVariable(
-      irgen_->getMainEntryName() + "SymbolTable", true);
-  GLOW_ASSERT(symbolTable &&
-              "Expected to find a symbol table for the AOT bundle");
+  auto symbolTableName = irgen_->getMainEntryName() + "SymbolTable";
+  auto symbolTable =
+      irgen_->getModule().getGlobalVariable(symbolTableName, true);
+  CHECK(symbolTable)
+      << "Expected to find a symbol table for the AOT bundle with name: "
+      << symbolTableName;
   // Get the integer type having the same size in bits as uint64_t.
   auto *uint64TType = irgen_->getBuilder().getIntNTy(sizeof(uint64_t) * 8);
   auto symbolTableEntryTy = symbolTable->getType()->getPointerElementType();
@@ -264,7 +269,7 @@ void BundleSaver::emitBundleConfig() {
                              irgen_->getAllocationsInfo().activationsMemSize_),
 
       llvm::ConstantInt::get(uint64TType, TensorAlignment),
-      llvm::ConstantInt::get(uint64TType, F_->findConstants().size()),
+      llvm::ConstantInt::get(uint64TType, F_->findPlaceholders().size()),
 
       symbolTable));
 }
@@ -281,12 +286,14 @@ void BundleSaver::performBundleMemoryAllocation() {
 void BundleSaver::save(llvm::StringRef target, llvm::StringRef arch,
                        llvm::StringRef cpu,
                        const llvm::SmallVectorImpl<std::string> &targetFeatures,
-                       llvm::StringRef outputDir, llvm::StringRef networkName) {
+                       llvm::StringRef outputDir, llvm::StringRef bundleName,
+                       llvm::StringRef mainEnryName) {
   // Object files generation works properly only in small mode.
   irgen_->initTargetMachine(target, arch, cpu, targetFeatures,
                             llvm::CodeModel::Model::Small);
-  irgen_->setMainEntryName(networkName);
   irgen_->setOutputDir(outputDir);
+  irgen_->setBundleName(bundleName);
+  irgen_->setMainEntryName(mainEnryName);
   irgen_->initCodeGen();
   // Perform the address assignment for activations and WeightVars.
   performBundleMemoryAllocation();

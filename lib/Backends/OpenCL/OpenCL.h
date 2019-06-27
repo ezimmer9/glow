@@ -16,14 +16,15 @@
 #ifndef GLOW_BACKENDS_OPENCL_OPENCL_H
 #define GLOW_BACKENDS_OPENCL_OPENCL_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/BackendUtils.h"
-#include "glow/Backends/CompiledFunction.h"
-#include "glow/Backends/ExecutionContext.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/BackendUtils.h"
+#include "glow/Backend/CompiledFunction.h"
 #include "glow/Base/Tensor.h"
 #include "glow/Base/Traits.h"
+#include "glow/ExecutionContext/ExecutionContext.h"
 #include "glow/Graph/Node.h"
 #include "glow/IR/IR.h"
+
 #include "llvm/ADT/ArrayRef.h"
 
 #include <unordered_map>
@@ -112,14 +113,14 @@ public:
   ///@{
   ~OpenCLFunction() override;
 
-  void execute(ExecutionContext *context) override;
+  llvm::Error execute(ExecutionContext *context) override;
 
   /// Collects constants for runtime.
   void collectConstants(const Module *module) override;
 
-  /// \returns the Kind of Backend used to compile this function.
-  virtual BackendKind getCompileBackendKind() const override {
-    return BackendKind::OpenCL;
+  /// \returns the backend used to compile this function.
+  virtual std::string getCompileBackendName() const override {
+    return "OpenCL";
   }
   ///@}
 
@@ -145,7 +146,8 @@ private:
                   ElemKind elemKind);
 
   /// Execution a convolution instruction which uses NCHW format.
-  void executeConvolution(const OCLConvolutionInst *CC);
+  void executeConvolution(const OCLConvolutionInst *CC,
+                          ExecutionContext *executionContext);
   /// Allocate a device buffer of required \p size.
   cl_mem allocDeviceBuffer(uint64_t size);
   /// Frees a device buffer.
@@ -190,18 +192,17 @@ public:
   ///@{
   ~OCLBackend() override = default;
 
-  BackendKind getBackendKind() const override { return BackendKind::OpenCL; }
-
-  std::string getBackendName() const override { return "OpenCL"; }
+  std::string getBackendName() const override { return getName(); }
+  static std::string getName() { return "OpenCL"; }
 
   std::unique_ptr<CompiledFunction>
   compileIR(std::unique_ptr<IRFunction> IR) const override;
 
-  std::unique_ptr<CompiledFunction>
+  llvm::Expected<std::unique_ptr<CompiledFunction>>
   compile(Function *F, const BackendOptions &opts) const override;
 
   bool transformPostLowering(Function *F,
-                             const CompilationContext &cctx) const override;
+                             CompilationContext &cctx) const override;
 
   bool isOpSupported(const NodeInfo &NI) const override;
 
@@ -232,7 +233,7 @@ namespace runtime {
 struct OpenCLDeviceBindings : DeviceBindings {
   OpenCLDeviceBindings(cl_mem buffer, cl_command_queue commands,
                        cl_device_id device, cl_context ctx)
-      : DeviceBindings(BackendKind::OpenCL), deviceBuffer{buffer},
+      : DeviceBindings(OCLBackend::getName()), deviceBuffer{buffer},
         commandQueue{commands}, deviceId{device}, context{ctx} {}
 
   /// CL memory buffer. Currently this contains both mutable and immutable

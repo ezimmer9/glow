@@ -32,14 +32,16 @@ class DummyDeviceManager : public DeviceManager {
   FunctionMapTy functions_;
 
 public:
-  DummyDeviceManager(BackendKind backend,
-                     std::unique_ptr<DeviceConfig> config = nullptr)
-      : DeviceManager(backend, std::move(config)) {}
+  DummyDeviceManager(const DeviceConfig &config) : DeviceManager(config) {}
 
   /// The DummyDeviceManager is a simple wrapper for testing, if you need
   /// memory guards you should implement a DeviceManager for your device.
-  uint64_t getMaximumMemory() const override { return 100; }
-  uint64_t getAvailableMemory() const override { return 100; }
+  uint64_t getMaximumMemory() const override {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  uint64_t getAvailableMemory() const override {
+    return std::numeric_limits<uint64_t>::max();
+  }
   bool isMemoryAvailable(uint64_t) const override { return true; }
 
   /// Load the provided module into the device, readyCB will be called when
@@ -98,15 +100,10 @@ public:
 
     CompiledFunction *func = funcIt->second;
 
-    PlaceholderBindings &bindings = *(context->getPlaceholderBindings());
-
-    func->setupRuns();
-    func->beforeRun(bindings);
-    func->execute(context.get());
-    func->afterRun(bindings);
+    auto executeErr = func->execute(context.get());
 
     // Fire the resultCB.
-    callback(0, llvm::Error::success(), std::move(context));
+    callback(0, std::move(executeErr), std::move(context));
 
     return 0;
   }

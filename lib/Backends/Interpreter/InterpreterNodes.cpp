@@ -95,7 +95,7 @@ template <typename ElemTy>
 void BoundInterpreterFunction::fwdConvolutionInstFloatImpl(
     Value *inV, Value *outV, Value *filterV, Value *biasV,
     llvm::ArrayRef<unsigned_t> kernelSizes, llvm::ArrayRef<unsigned_t> strides,
-    llvm::ArrayRef<unsigned_t> pads, size_t group) {
+    llvm::ArrayRef<unsigned_t> pads, size_t group, size_t dilation) {
   staticAssertFloatingPointType(ElemTy);
 
   auto inW = getWeightHandle<ElemTy>(inV);
@@ -134,8 +134,8 @@ void BoundInterpreterFunction::fwdConvolutionInstFloatImpl(
             float sum = 0;
             for (size_t fx = 0; fx < kdim.height; fx++) {
               for (size_t fy = 0; fy < kdim.width; fy++) {
-                ssize_t ox = x + fx;
-                ssize_t oy = y + fy;
+                ssize_t ox = x + fx * dilation;
+                ssize_t oy = y + fy * dilation;
 
                 // Ignore index access below zero (this is due to padding).
                 if (ox < 0 || oy < 0 || ox >= ssize_t(idim.h) ||
@@ -165,7 +165,7 @@ template <typename ElemTy, typename AccumulatorTy>
 void BoundInterpreterFunction::fwdConvolutionInstQuantizedImpl(
     Value *inV, Value *outV, Value *filterV, Value *biasV,
     llvm::ArrayRef<unsigned_t> kernelSizes, llvm::ArrayRef<unsigned_t> strides,
-    llvm::ArrayRef<unsigned_t> pads, size_t group) {
+    llvm::ArrayRef<unsigned_t> pads, size_t group, size_t dilation) {
   auto inW = getWeightHandle<ElemTy>(inV);
   auto outW = getWeightHandle<ElemTy>(outV);
   auto filterW = getWeightHandle<ElemTy>(filterV);
@@ -219,8 +219,8 @@ void BoundInterpreterFunction::fwdConvolutionInstQuantizedImpl(
             AccumulatorTy sum = 0;
             for (size_t fx = 0; fx < kdim.height; fx++) {
               for (size_t fy = 0; fy < kdim.width; fy++) {
-                ssize_t ox = x + fx;
-                ssize_t oy = y + fy;
+                ssize_t ox = x + fx * dilation;
+                ssize_t oy = y + fy * dilation;
 
                 // Ignore index access below zero (this is due to padding).
                 if (ox < 0 || oy < 0 || ox >= ssize_t(idim.h) ||
@@ -266,14 +266,14 @@ void BoundInterpreterFunction::fwdConvolutionInst(const ConvolutionInst *I) {
     dispatchQuantizedWithAccumulationImpl(
         fwdConvolutionInstQuantizedImpl, I->getSrc()->getElementType(),
         I->getSrc(), I->getDest(), I->getFilter(), I->getBias(), kernelSizes,
-        strides, pads, group);
+        strides, pads, group, I->getDilation());
     return;
   }
 
-  dispatchFloatingPointImpl(fwdConvolutionInstFloatImpl,
-                            I->getSrc()->getElementType(), I->getSrc(),
-                            I->getDest(), I->getFilter(), I->getBias(),
-                            kernelSizes, strides, pads, group);
+  dispatchFloatingPointImpl(
+      fwdConvolutionInstFloatImpl, I->getSrc()->getElementType(), I->getSrc(),
+      I->getDest(), I->getFilter(), I->getBias(), kernelSizes, strides, pads,
+      group, I->getDilation());
 }
 
 void BoundInterpreterFunction::fwdConvolutionGradInst(
@@ -287,6 +287,7 @@ void BoundInterpreterFunction::fwdConvolutionGradInst(
   auto biasG = getWeightHandle(I->getBiasGrad());
 
   size_t group = I->getGroup();
+  size_t dilation = I->getDilation();
 
   inG.clear();
   filterG.clear();
@@ -323,8 +324,8 @@ void BoundInterpreterFunction::fwdConvolutionGradInst(
             // For each element in the convolution-filter:
             for (size_t fx = 0; fx < kdim.height; fx++) {
               for (size_t fy = 0; fy < kdim.width; fy++) {
-                ssize_t ox = x + fx;
-                ssize_t oy = y + fy;
+                ssize_t ox = x + fx * dilation;
+                ssize_t oy = y + fy * dilation;
 
                 // Ignore index access below zero (this is due to padding).
                 if (ox < 0 || oy < 0 || ox >= ssize_t(idim.h) ||
@@ -557,6 +558,104 @@ void BoundInterpreterFunction::fwdConvolution3DGradInst(
   (void)I;
   // TODO
   llvm_unreachable("not yet implemented");
+}
+
+void BoundInterpreterFunction::fwdChannelwiseQuantizedConvolutionInst(
+    const ChannelwiseQuantizedConvolutionInst *I) {
+  assert(I->getGroupwise() && "Non-groupwise not supported");
+
+  using AccumulatorTy = int32_t;
+
+  auto inW = getWeightHandle<int8_t>(I->getSrc());
+  auto outW = getWeightHandle<int8_t>(I->getDest());
+  auto filterW = getWeightHandle<int8_t>(I->getFilter());
+  auto biasW = getWeightHandle<float>(I->getBias());
+  auto scalesW = getWeightHandle<float>(I->getScales());
+  auto offsetsW = getWeightHandle<int32_t>(I->getOffsets());
+
+  llvm::ArrayRef<unsigned_t> kernelSizes = I->getKernels();
+  llvm::ArrayRef<unsigned_t> pads = I->getPads();
+  llvm::ArrayRef<unsigned_t> strides = I->getStrides();
+  size_t group = I->getGroup();
+
+  ShapeNHWC odim(outW.dims());
+  ShapeNHWC idim(inW.dims());
+  ShapeHW kdim(kernelSizes);
+  ShapeHW sdim(strides);
+
+  assert(idim.c % group == 0 && "Input channels must be divisible by group.");
+  assert(odim.c % group == 0 && "Output channels must be divisible by group.");
+  size_t inCperG = idim.c / group;
+  size_t outCperG = odim.c / group;
+
+  PaddingTLBR pdim(pads);
+
+  auto &inTy = inW.getType();
+  auto &outTy = outW.getType();
+
+  float inScale = inTy.getScale();
+  float outScale = outTy.getScale();
+
+  int32_t inOffset = inTy.getOffset();
+  int32_t outOffset = outTy.getOffset();
+
+  // For each input in the batch:
+  for (size_t n = 0; n < idim.n; n++) {
+    // For each group of input channels:
+    for (size_t g = 0; g < group; g++) {
+
+      // get groupwise qparams params
+      int32_t filterOffset = offsetsW.at(g);
+      float filterScale = scalesW.at(g);
+      float matMulScale = inScale * filterScale;
+
+      // For each output channel in the group:
+      for (size_t d = g * outCperG; d < (g + 1) * outCperG; d++) {
+
+        // For each convolution 'jump' in the input tensor:
+        ssize_t x = -ssize_t(pdim.top);
+        for (size_t ax = 0; ax < odim.h; x += sdim.height, ax++) {
+          ssize_t y = -ssize_t(pdim.left);
+          for (size_t ay = 0; ay < odim.w; y += sdim.width, ay++) {
+
+            // For each element in the convolution-filter:
+            AccumulatorTy sum = 0;
+            for (size_t fx = 0; fx < kdim.height; fx++) {
+              for (size_t fy = 0; fy < kdim.width; fy++) {
+                ssize_t ox = x + fx;
+                ssize_t oy = y + fy;
+
+                // Ignore index access below zero (this is due to padding).
+                if (ox < 0 || oy < 0 || ox >= ssize_t(idim.h) ||
+                    oy >= ssize_t(idim.w)) {
+                  continue;
+                }
+                for (size_t fd = 0; fd < inCperG; fd++) {
+
+                  AccumulatorTy F = filterW.at({d, fx, fy, fd});
+                  AccumulatorTy I =
+                      inW.at({n, (size_t)ox, (size_t)oy, g * inCperG + fd});
+                  // We represent the element multiplication with offset as
+                  // (value - offset).
+                  sum += (F - filterOffset) * (I - inOffset);
+                }
+              }
+            }
+
+            // Scale the bias to match the scale of the matrix multiplication.
+            AccumulatorTy B = std::round(biasW.at({d}) / matMulScale);
+
+            // Add the bias:
+            sum += B;
+
+            // Scale the result back to the expected destination scale.
+            outW.at({n, ax, ay, d}) = quantization::clip<AccumulatorTy, int8_t>(
+                std::round(float(sum) * (matMulScale / outScale) + outOffset));
+          } // W
+        }   // H
+      }     // C
+    }       // G
+  }         // N
 }
 
 //===----------------------------------------------------------------------===//
@@ -956,6 +1055,7 @@ void BoundInterpreterFunction::fwdCrossEntropyLossInstFloatImpl(
   auto labels = getWeightHandle<int64_t>(I->getLabels());
   auto CE = getWeightHandle<ElemTy>(I->getCE());
   auto dims = P.dims();
+  CE.clear();
   for (size_t n = 0; n < dims[0]; ++n) {
     assert(labels.raw(n) >= 0 && "Cannot use negative index.");
     size_t y = labels.raw(n);
@@ -1016,8 +1116,16 @@ void BoundInterpreterFunction::fwdSplatInst(const glow::SplatInst *I) {
   auto *T = getTensor(I->getDest());
   ElemKind k = T->getElementType();
 
+  if (k == ElemKind::Int32ITy) {
+    return T->getHandle<int32_t>().clear(I->getValue());
+  }
+
   if (k == ElemKind::Int64ITy) {
     return T->getHandle<int64_t>().clear(I->getValue());
+  }
+
+  if (k == ElemKind::Int32ITy) {
+    return T->getHandle<int32_t>().clear(I->getValue());
   }
 
   if (k == ElemKind::FloatTy) {
@@ -1037,6 +1145,10 @@ void BoundInterpreterFunction::fwdSplatInst(const glow::SplatInst *I) {
     return T->getHandle<int8_t>().clear(quantization::quantize(val, destQ));
   }
 
+  if (k == ElemKind::BoolTy) {
+    return T->getHandle<bool>().clear(static_cast<bool>(I->getValue()));
+  }
+
   llvm_unreachable("Unsupported tensor type");
 }
 
@@ -1053,9 +1165,11 @@ void BoundInterpreterFunction::fwdInsertTensorInst(
   }
 
   TYPED_INSERT(int64_t, ElemKind::Int64ITy);
+  TYPED_INSERT(int32_t, ElemKind::Int32ITy);
   TYPED_INSERT(float, ElemKind::FloatTy);
   TYPED_INSERT(float16_t, ElemKind::Float16Ty);
   TYPED_INSERT(int8_t, ElemKind::Int8QTy);
+  TYPED_INSERT(bool, ElemKind::BoolTy);
 #undef TYPED_INSERT
 
   llvm_unreachable("Unsupported tensor type");
@@ -1277,6 +1391,59 @@ void BoundInterpreterFunction::fwdBatchOneHotInst(
   default:
     dispatchFloatingPointImpl(fwdBatchOneHotImpl,
                               I->getData()->getElementType(), I);
+  }
+}
+
+template <typename ElemTy>
+void BoundInterpreterFunction::fwdSpaceToDepthInstImpl(
+    const glow::SpaceToDepthInst *I) {
+  auto *inT = getTensor(I->getSrc());
+  auto *outT = getTensor(I->getDest());
+
+  auto inH = inT->getHandle<ElemTy>();
+  auto outH = outT->getHandle<ElemTy>();
+
+  unsigned blockSize = I->getBlockSize();
+
+  size_t inDepth = inT->dims()[3];
+
+  size_t outBatch = outT->dims()[0];
+  size_t outHeight = outT->dims()[1];
+  size_t outWidth = outT->dims()[2];
+  size_t outDepth = outT->dims()[3];
+
+  for (size_t ob = 0; ob < outBatch; ++ob) {
+    for (size_t oh = 0; oh < outHeight; ++oh) {
+      for (size_t ow = 0; ow < outWidth; ++ow) {
+        for (size_t oc = 0; oc < outDepth; ++oc) {
+          // Gets the block layer we are on
+          size_t blockDepthLayer = oc / inDepth;
+          // every multiple of block size we reset to 0 offset
+          size_t iw = ow * blockSize + blockDepthLayer % blockSize;
+          // every multiple of blockSize we start height traversal + 1
+          size_t ih = oh * blockSize + blockDepthLayer / blockSize;
+          // at every multiple of inDepth index in to input depths resets to 0
+          size_t ic = oc % inDepth;
+
+          outH.at({ob, oh, ow, oc}) = inH.at({ob, ih, iw, ic});
+        }
+      }
+    }
+  }
+}
+
+void BoundInterpreterFunction::fwdSpaceToDepthInst(
+    const glow::SpaceToDepthInst *I) {
+  switch (I->getSrc()->getElementType()) {
+  case ElemKind::FloatTy:
+    fwdSpaceToDepthInstImpl<float>(I);
+    break;
+  case ElemKind::Int8QTy:
+    fwdSpaceToDepthInstImpl<int8_t>(I);
+    break;
+  default:
+    llvm_unreachable("Type is not supported");
+    break;
   }
 }
 
@@ -1829,6 +1996,24 @@ void BoundInterpreterFunction::fwdElementLogInst(const ElementLogInst *I) {
 }
 
 template <typename ElemTy>
+void BoundInterpreterFunction::fwdElementExpInstFloatImpl(
+    const ElementExpInst *I) {
+  staticAssertFloatingPointType(ElemTy);
+
+  auto inW = getWeightHandle<ElemTy>(I->getSrc());
+  auto outW = getWeightHandle<ElemTy>(I->getDest());
+  for (size_t i = 0, e = inW.size(); i < e; i++) {
+    float val = inW.raw(i);
+    outW.raw(i) = ElemTy(exp(val));
+  }
+}
+
+void BoundInterpreterFunction::fwdElementExpInst(const ElementExpInst *I) {
+  dispatchFloatingPointImpl(fwdElementExpInstFloatImpl,
+                            I->getSrc()->getElementType(), I);
+}
+
+template <typename ElemTy>
 void BoundInterpreterFunction::fwdElementSelectInstFloatImpl(
     const glow::ElementSelectInst *I) {
   staticAssertFloatingPointType(ElemTy);
@@ -2258,6 +2443,102 @@ void BoundInterpreterFunction::fwdLengthsSumInst(const LengthsSumInst *I) {
                             I->getData()->getElementType(), I)
 }
 
+void BoundInterpreterFunction::fwdSparseLengthsSumInstI8Impl(
+    const SparseLengthsSumInst *I) {
+
+  auto out = getTensor(I->getDest());
+  auto data = getTensor(I->getData());
+  auto indices = getTensor(I->getIndices());
+  auto lengths = getTensor(I->getLengths());
+
+  out->zero();
+
+  auto IH = indices->getHandle<int64_t>();
+  auto LH = lengths->getHandle<int32_t>();
+
+  size_t segments = lengths->dims()[0];
+  size_t totalLength = 0;
+  for (size_t i = 0; i < segments; i++) {
+    totalLength += LH.raw(i);
+  }
+  assert(totalLength <= indices->dims()[0] &&
+         "sum(Lengths) must be equal to len(Indices)");
+
+  size_t lineSize = data->size() / data->dims()[0];
+
+  auto DH = data->getHandle<int8_t>();
+  auto OH = out->getHandle<int8_t>();
+
+  auto TQP = [](Tensor *T) {
+    return TensorQuantizationParams{T->getType().getScale(),
+                                    T->getType().getOffset()};
+  };
+
+  size_t curIdx = 0;
+  for (size_t i = 0; i < segments; i++) {
+    std::vector<float> accum(lineSize, 0.0f);
+    for (int32_t j = 0; j < LH.raw(i); j++) {
+      size_t offsetIn = IH.raw(curIdx) * lineSize;
+      for (size_t k = 0; k < lineSize; k++) {
+        accum[k] += quantization::dequantize(DH.raw(offsetIn++), TQP(data));
+      }
+      curIdx++;
+    }
+    size_t offsetOut = i * lineSize;
+    for (size_t k = 0; k < lineSize; k++) {
+      OH.raw(offsetOut++) = quantization::quantize(accum[k], TQP(out));
+    }
+  }
+}
+
+template <typename ElemTy>
+void BoundInterpreterFunction::fwdSparseLengthsSumInstFloatImpl(
+    const SparseLengthsSumInst *I) {
+  staticAssertFloatingPointType(ElemTy);
+
+  auto out = getTensor(I->getDest());
+  auto data = getTensor(I->getData());
+  auto indices = getTensor(I->getIndices());
+  auto lengths = getTensor(I->getLengths());
+
+  out->zero();
+
+  auto IH = indices->getHandle<int64_t>();
+  auto LH = lengths->getHandle<int32_t>();
+
+  size_t segments = lengths->dims()[0];
+  size_t totalLength = 0;
+  for (size_t i = 0; i < segments; i++) {
+    totalLength += LH.raw(i);
+  }
+  assert(totalLength <= indices->dims()[0] &&
+         "sum(Lengths) must be equal to len(Indices)");
+
+  size_t lineSize = data->size() / data->dims()[0];
+
+  auto DH = data->getHandle<ElemTy>();
+  auto OH = out->getHandle<ElemTy>();
+
+  size_t curIdx = 0;
+  for (size_t i = 0; i < segments; i++) {
+    for (size_t j = 0, e = LH.raw(i); j < e; j++) {
+      size_t offsetIn = IH.raw(curIdx++) * lineSize;
+      size_t offsetOut = i * lineSize;
+      for (size_t k = 0; k < lineSize; k++)
+        OH.raw(offsetOut++) += DH.raw(offsetIn++);
+    }
+  }
+}
+
+void BoundInterpreterFunction::fwdSparseLengthsSumInst(
+    const SparseLengthsSumInst *I) {
+  if (I->getDest()->getType()->isQuantizedType()) {
+    return fwdSparseLengthsSumInstI8Impl(I);
+  }
+  dispatchFloatingPointImpl(fwdSparseLengthsSumInstFloatImpl,
+                            I->getData()->getElementType(), I);
+}
+
 template <typename ElemTy>
 void BoundInterpreterFunction::fwdSparseLengthsWeightedSumInstFloatImpl(
     const SparseLengthsWeightedSumInst *I) {
@@ -2367,7 +2648,9 @@ void BoundInterpreterFunction::fwdSparseLengthsWeightedSumGradInst(
          "Input type must be float");
 
   auto destGrad = getTensor(I->getDestGrad());
+  auto data = getTensor(I->getData());
   auto dataGrad = getTensor(I->getDataGrad());
+  auto weightsGrad = getTensor(I->getWeightsGrad());
   auto weights = getTensor(I->getWeights());
   auto indices = getTensor(I->getIndices());
   auto lengths = getTensor(I->getLengths());
@@ -2381,7 +2664,7 @@ void BoundInterpreterFunction::fwdSparseLengthsWeightedSumGradInst(
 
   size_t segments = lengths->dims()[0];
   size_t totalLength = 0;
-  for (size_t i = 0; i < segments; i++) {
+  for (size_t i = 0; i < segments; ++i) {
     totalLength += LH.raw(i);
   }
   assert(totalLength == indices->dims()[0] &&
@@ -2391,20 +2674,31 @@ void BoundInterpreterFunction::fwdSparseLengthsWeightedSumGradInst(
 
   auto IGH = destGrad->getHandle();
   auto WH = weights->getHandle();
+  auto WGH = weightsGrad->getHandle();
+  auto DH = data->getHandle();
   auto OGH = dataGrad->getHandle();
 
-  // For each index in each segment, accumulate into the corresponding data
-  // gradient the product of the gradient of the result it was added to and
-  // the weight that it was multiplied by during the
-  // SparseLengthsWeightedSum operation.
-  size_t curIdx = 0;
-  for (size_t i = 0; i < segments; i++) {
-    size_t offsetIn = i * lineSize;
-    for (size_t j = 0, e = LH.raw(i); j < e; j++) {
+  // For each index in each segment:
+  //    1) accumulate into the corresponding data gradient the product of the
+  //    gradient of the result it was added to and the weight that it was
+  //    multiplied by during the SparseLengthsWeightedSum operation.
+  //
+  //    2) accumulate into each weight gradient the reduced sum of the
+  //    elementwise product of the result slice that the corresponding weight
+  //    produced and the input slice that the weight was multiplied with.
+  for (size_t i = 0, curIdx = 0; i < segments; ++i) {
+    size_t destOffset = i * lineSize;
+    for (size_t j = 0, e = LH.raw(i); j < e; ++j, ++curIdx) {
+      float weightGrad = 0.0f;
       float weight = WH.raw(curIdx);
-      size_t offsetOut = IH.raw(curIdx++) * lineSize;
-      for (size_t k = 0; k < lineSize; k++)
-        OGH.raw(offsetOut++) += IGH.raw(offsetIn) * weight;
+      size_t dataOffset = IH.raw(curIdx) * lineSize;
+
+      for (size_t k = 0; k < lineSize; ++k) {
+        OGH.raw(dataOffset + k) += IGH.raw(destOffset + k) * weight;
+        weightGrad += IGH.raw(destOffset + k) * DH.raw(dataOffset + k);
+      }
+
+      WGH.raw(curIdx) = weightGrad;
     }
   }
 }
@@ -2522,6 +2816,18 @@ void BoundInterpreterFunction::fwdLengthsToRangesInst(
     ranges.at({i, 0}) = offset;
     ranges.at({i, 1}) = length;
     offset += length;
+  }
+}
+
+void BoundInterpreterFunction::fwdLengthsRangeFillInst(
+    const LengthsRangeFillInst *I) {
+  auto lengthsH = getTensor(I->getLengths())->getHandle<int32_t>();
+  auto resultH = getTensor(I->getDest())->getHandle<int32_t>();
+  size_t curIdx = 0;
+  for (size_t i = 0, e = lengthsH.dims()[0]; i < e; i++) {
+    for (int32_t j = 0, f = lengthsH.at({i}); j < f; j++) {
+      resultH.at({curIdx++}) = j;
+    }
   }
 }
 

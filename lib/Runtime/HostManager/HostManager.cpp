@@ -17,11 +17,13 @@
 #include "glow/Runtime/HostManager/HostManager.h"
 #include "glow/Backends/DeviceManager.h"
 #include "glow/Graph/PlaceholderBindings.h"
-#include "glow/Optimizer/Optimizer.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Partitioner/Partitioner.h"
-#include "glow/Runtime/Executor/Executor.h"
+#include "glow/Runtime/Executor/ThreadPoolExecutor.h"
 #include "glow/Runtime/Provisioner/Provisioner.h"
 #include "glow/Runtime/RuntimeTypes.h"
+
+#include <glog/logging.h>
 
 #include <future>
 #include <queue>
@@ -29,34 +31,40 @@
 using namespace glow;
 using namespace runtime;
 
-HostManager::HostManager(std::vector<std::unique_ptr<DeviceConfig>> configs) {
+HostManager::HostManager(const HostConfig &hostConfig) : config_(hostConfig) {}
+
+HostManager::HostManager(
+    std::vector<std::unique_ptr<DeviceConfig>> deviceConfigs) {
   // TODO: move all initialization out of constructor.
-  TEMP_EXIT_ON_ERR(init(std::move(configs)));
+  TEMP_EXIT_ON_ERR(init(std::move(deviceConfigs)));
+}
+
+HostManager::HostManager(
+    std::vector<std::unique_ptr<DeviceConfig>> deviceConfigs,
+    const HostConfig &hostConfig)
+    : config_(hostConfig) {
+  // TODO: move all initialization out of constructor.
+  TEMP_EXIT_ON_ERR(init(std::move(deviceConfigs)));
 }
 
 llvm::Error
 HostManager::init(std::vector<std::unique_ptr<DeviceConfig>> configs) {
   DeviceIDTy deviceCount = 0;
 
-  if (configs.size() > 0) {
-    backend_.reset(createBackend(configs[0]->getBackendKind()));
-  }
-
   for (auto &config : configs) {
     if (!config->hasName()) {
-      config->setName(backend_->getBackendName() + std::to_string(deviceCount));
+      config->name = "config" + std::to_string(deviceCount);
     }
 
-    auto backendKind = config->getBackendKind();
     devices_[deviceCount] = std::unique_ptr<DeviceManager>(
-        DeviceManager::createDeviceManager(backendKind, std::move(config)));
+        DeviceManager::createDeviceManager(*config));
 
     RETURN_IF_ERR(devices_[deviceCount]->init());
 
     deviceCount++;
   }
   provisioner_.reset(new Provisioner(devices_));
-  executor_.reset(createExecutor(devices_));
+  executor_.reset(new ThreadPoolExecutor(devices_, config_.executorThreads));
 
   return llvm::Error::success();
 }
@@ -64,6 +72,7 @@ HostManager::init(std::vector<std::unique_ptr<DeviceConfig>> configs) {
 HostManager::~HostManager() { llvm::toString(clearHost()); }
 
 llvm::Error HostManager::addNetwork(std::unique_ptr<Module> module,
+                                    CompilationContext &cctx,
                                     bool saturateHost) {
   std::lock_guard<std::mutex> networkLock(networkLock_);
   auto functions = module->getFunctions();
@@ -80,27 +89,36 @@ llvm::Error HostManager::addNetwork(std::unique_ptr<Module> module,
   for (auto &device : devices_) {
     DeviceInfo info = DeviceInfo();
     info.availableMemory = device.second->getAvailableMemory();
+    info.backendName = device.second->getBackendName();
     deviceInfo.push_back(info);
   }
-  // Optimize functions before passing to partitioner.
-  // Currently hardcoding inference.
-  if (backend_) {
-    CompilationContext cctx;
-    cctx.mode = CompilationMode::Infer;
-    for (auto F : module->getFunctions()) {
-      ::glow::optimizeFunction(F, *backend_, cctx);
-    }
+  // Perform a round of target-independent graph optimizations. This helps the
+  // partitioner to do its job more efficiently.
+  for (Function *F : module->getFunctions()) {
+    RETURN_IF_ERR(optimizeFunctionBeforeLowering(F, cctx));
   }
   auto partitioner = Partitioner(module.get(), deviceInfo, saturateHost);
-  RETURN_IF_ERR(partitioner.Partition());
+  RETURN_IF_ERR(partitioner.Partition(cctx));
   auto nodeList = std::move(partitioner.getPartitionResult());
+  if (cctx.precisionConfig.quantMode == QuantizationMode::Profile) {
+    // Check that all functions were not partitioned.
+    for (auto &network : nodeList) {
+      if (network.nodes.size() > 1) {
+        return MAKE_ERR(
+            GlowErr::ErrorCode::RUNTIME_ERROR,
+            "Failed to add network for profiling: Network was "
+            "partitioned, this is likely because the network was "
+            "larger than the configured memory of a single device manager.");
+      }
+    }
+  }
 
-  RETURN_IF_ERR(provisioner_->provision(nodeList, *module));
+  RETURN_IF_ERR(provisioner_->provision(nodeList, *module, cctx));
 
-  // Clear everything but placeholders from the module then put it a shared_ptr
-  // to be shared between all of the networks created from each function in the
-  // module.
-  module->clear(/* clearPlaceholders */ false);
+  // Clear constants contents from the module then put it in a
+  // shared_ptr to be shared between all of the networks created from each
+  // function in the module.
+  module->strip();
   auto sharedModule = std::shared_ptr<Module>(std::move(module));
 
   for (auto &node : nodeList) {
@@ -112,31 +130,44 @@ llvm::Error HostManager::addNetwork(std::unique_ptr<Module> module,
   return llvm::Error::success();
 }
 
-void HostManager::removeNetwork(llvm::StringRef networkName) {
+llvm::Error HostManager::removeNetwork(llvm::StringRef networkName) {
   std::lock_guard<std::mutex> networkLock(networkLock_);
   auto networkIterator = networks_.find(networkName);
   if (networkIterator == networks_.end()) {
-    return;
+    return llvm::Error::success();
   }
+
+  // Issue an error as there are outstanding runs for the network
+  if (networkIterator->second.refcount != 0) {
+    return MAKE_ERR(GlowErr::ErrorCode::RUNTIME_NET_BUSY,
+                    llvm::formatv("Cannot remove the network {0}, as there are "
+                                  "still outstanding runs",
+                                  networkName)
+                        .str());
+  }
+
+  OneErrOnly err;
   auto &nodes = networkIterator->second.dag.nodes;
   for (auto &node : nodes) {
     for (auto device : node->deviceIDs) {
       std::promise<void> removeNetwork;
-      llvm::Error removeErr = llvm::Error::success();
       auto done = removeNetwork.get_future();
+      std::unique_ptr<llvm::Error> removeErr;
       devices_[device]->evictNetwork(
           node->name,
           [&removeNetwork, &removeErr](std::string name, llvm::Error err) {
-            removeErr = std::move(err);
+            removeErr = llvm::make_unique<llvm::Error>(std::move(err));
             removeNetwork.set_value();
           });
       done.get();
-      errToBool(std::move(removeErr));
+      err.set(std::move(*DCHECK_NOTNULL(removeErr.get())));
     }
     // Also remove compiledFunction from Provisioner.
     provisioner_->removeFunction(node->name);
   }
   networks_.erase(networkIterator);
+
+  return err.get();
 }
 
 bool HostManager::networkAdded(llvm::StringRef networkName) {
@@ -148,8 +179,9 @@ llvm::Error HostManager::clearHost() {
   // shutdown the executor, blocking on any current inflight and prevent new
   // requests from being serviced.
   executor_->shutdown();
-  assert(activeRequestCount_ == 0 &&
-         "All requests should be finished when shutting down HostManager.");
+
+  DCHECK_EQ(activeRequestCount_, 0)
+      << "All requests should be finished when shutting down HostManager.";
 
   std::lock_guard<std::mutex> networkLock(networkLock_);
   OneErrOnly errContainer;
@@ -168,15 +200,51 @@ llvm::Error HostManager::clearHost() {
   return errContainer.get();
 }
 
+llvm::Error HostManager::runNetworkBlocking(llvm::StringRef networkName,
+                                            PlaceholderBindings &bindings) {
+  std::unique_ptr<PlaceholderBindings> phBindings(&bindings);
+  std::unique_ptr<ExecutionContext> context =
+      llvm::make_unique<ExecutionContext>(std::move(phBindings));
+  std::promise<void> runPromise;
+  auto fut = runPromise.get_future();
+  std::unique_ptr<llvm::Error> runErr;
+  runNetwork(
+      networkName, std::move(context),
+      [&runPromise, &runErr](runtime::RunIdentifierTy, llvm::Error err,
+                             std::unique_ptr<ExecutionContext> contextPtr) {
+        // Don't delete ph bindings since they were created from a passed in
+        // reference.
+        std::unique_ptr<PlaceholderBindings> phBind =
+            contextPtr->movePlaceholderBindings();
+        phBind.release();
+
+        runErr = llvm::make_unique<llvm::Error>(std::move(err));
+        runPromise.set_value();
+      });
+
+  fut.wait();
+  return std::move(*DCHECK_NOTNULL(runErr.get()));
+}
+
 RunIdentifierTy
 HostManager::runNetwork(llvm::StringRef networkName,
                         std::unique_ptr<ExecutionContext> context,
                         ResultCBTy callback) {
-  ScopedTraceBlock(context->getTraceContext(),
-                   "runFunction_" + networkName.str());
+  TRACE_EVENT_SCOPE(context->getTraceContext(), TraceLevel::RUNTIME,
+                    "HostManager::runNetwork");
   auto currentRun = totalRequestCount_++;
-  std::lock_guard<std::mutex> networkLock(networkLock_);
-  if (networks_.find(networkName) == networks_.end()) {
+
+  NetworkData *network = nullptr;
+  {
+    std::lock_guard<std::mutex> networkLock(networkLock_);
+    auto it = networks_.find(networkName);
+    if (it != networks_.end()) {
+      network = &it->second;
+      network->refcount++;
+    }
+  }
+
+  if (network == nullptr) {
     callback(
         currentRun,
         MAKE_ERR(GlowErr::ErrorCode::RUNTIME_NET_NOT_FOUND,
@@ -186,26 +254,35 @@ HostManager::runNetwork(llvm::StringRef networkName,
   }
 
   size_t activeRequestCount = activeRequestCount_++;
-  if (activeRequestCount >= activeRequestLimit_) {
+  if (activeRequestCount >= config_.maxActiveRequests) {
     activeRequestCount_--;
+    network->refcount--;
     callback(
         currentRun,
         MAKE_ERR(GlowErr::ErrorCode::RUNTIME_REQUEST_REFUSED,
                  strFormat("The number of allowed requests has been exceeded. "
-                           "active requests: %lu allowed requests: %u",
-                           activeRequestCount, activeRequestLimit_)),
+                           "active requests: %lu allowed requests: %zu",
+                           activeRequestCount, config_.maxActiveRequests)),
         std::move(context));
     return currentRun;
   }
 
-  executor_->run(
-      networks_[networkName].dag.root.get(), std::move(context), currentRun,
-      [&activeRequest = this->activeRequestCount_, callback,
-       name = networkName.str()](RunIdentifierTy runID, llvm::Error err,
-                                 std::unique_ptr<ExecutionContext> context) {
-        --activeRequest;
-        TRACE_EVENT_INSTANT(context->getTraceContext(), "finish_" + name);
-        callback(runID, std::move(err), std::move(context));
-      });
+  executor_->run(networks_[networkName].dag.root.get(), std::move(context),
+                 currentRun,
+                 [this, callback, name = networkName.str()](
+                     RunIdentifierTy runID, llvm::Error err,
+                     std::unique_ptr<ExecutionContext> context) {
+                   {
+                     std::lock_guard<std::mutex> networkLock(networkLock_);
+                     auto it = networks_.find(name);
+                     if (it != networks_.end()) {
+                       it->second.refcount--;
+                     }
+                   }
+                   TRACE_EVENT_INSTANT(context->getTraceContext(),
+                                       TraceLevel::RUNTIME, "finish_" + name);
+                   callback(runID, std::move(err), std::move(context));
+                   --activeRequestCount_;
+                 });
   return currentRun;
 }

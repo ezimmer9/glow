@@ -14,13 +14,22 @@
  * limitations under the License.
  */
 
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 
 namespace glow {
 
-Backend *createBackend(BackendKind backendKind) {
-  auto *backend = FactoryRegistry<BackendKind, Backend>::get(backendKind);
-  GLOW_ASSERT(backend != nullptr && "Cannot find registered backend");
+Backend *createBackend(llvm::StringRef backendName) {
+  auto *backend = FactoryRegistry<std::string, Backend>::get(backendName);
+
+  if (backend == nullptr) {
+    LOG(INFO) << "List of all registered backends:";
+    for (const auto &factory :
+         FactoryRegistry<std::string, Backend>::factories()) {
+      LOG(INFO) << factory.first;
+    }
+  }
+  CHECK(backend) << strFormat("Cannot find registered backend: %s",
+                              backendName.data());
   return backend;
 }
 

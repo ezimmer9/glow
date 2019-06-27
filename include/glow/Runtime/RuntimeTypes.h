@@ -16,8 +16,8 @@
 #ifndef GLOW_RUNTIME_RUNTIMETYPES_H
 #define GLOW_RUNTIME_RUNTIMETYPES_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/BackendUtils.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/BackendUtils.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Support/Error.h"
 
@@ -49,6 +49,8 @@ using ResultCBTy = std::function<void(runtime::RunIdentifierTy, llvm::Error,
 struct DeviceInfo {
   /// Available memory on device in bytes.
   uint64_t availableMemory;
+  /// Backend Type.
+  std::string backendName;
   /// Available SRAM capacity in bytes.
   uint64_t sramCapacity;
   /// Peak compute on device in ops/second. Assumes all ops are in int8.
@@ -73,6 +75,8 @@ struct DAGNode {
   std::vector<DAGNode *> parents;
   /// IDs of the deviceManagers that this network is assigned to.
   std::vector<DeviceIDTy> deviceIDs;
+  /// Backend name for this network.
+  std::string backendName;
   /// The logicalDevice is an output of the Partitioner to indicate that two
   /// networks should be assigned to the same device. Multiple logical devices
   /// indicates the network should be duplicated.
@@ -99,16 +103,17 @@ struct DAGNode {
 
 /// This struct represents a DAG. The first element is the root of a DAG, and
 /// the second one is a list of all rest nodes in this DAG.
-using rootDAGNodeTy = std::unique_ptr<DAGNode>;
-using nodesDAGNodeTy = std::vector<std::unique_ptr<DAGNode>>;
+using DAGNodePtr = std::unique_ptr<DAGNode>;
+using DAGNodePtrVec = std::vector<std::unique_ptr<DAGNode>>;
+
 struct DAG {
   /// This is a root node it does not map directly to a loaded function. It
   /// contains the name of the network, a list of children, and a reference to
   /// the Module the function came from.
-  rootDAGNodeTy root;
+  DAGNodePtr root;
   /// This is a vector of all the DAGNodes. Structure is encoded in the DAGNodes
   /// with pointers to parents and children.
-  nodesDAGNodeTy nodes;
+  DAGNodePtrVec nodes;
 };
 
 /// This list contains all the created DAGNodes from the Partitioner. The
@@ -117,25 +122,45 @@ using DAGListTy = std::vector<DAG>;
 
 /// This is the base class for DeviceManager configurations. Any specific
 /// device can extend this class to contain information to identify
-/// and configure the device manager. Additionally it needs to set it's kind_
-/// member variable to it's correct BackendKind.
-class DeviceConfig {
-  /// An enum indicating what kind of backend this config is for. It is used in
+/// and configure the device manager. Additionally it needs to set it's backend
+/// member variable to it's correct Backend.
+struct DeviceConfig {
+  /// Backend used for this config. It is used in
   /// checking the type of config before casting to a derived class.
-  const BackendKind backendKind_;
+  const std::string backendName;
   /// A human readable name to identify the device.
-  std::string name_;
+  std::string name;
+  /// Device memory size in bytes.
+  uint64_t deviceMemory = 0;
+  /// A map of configuration parameters.
+  llvm::StringMap<std::string> parameters{};
 
-public:
-  DeviceConfig(BackendKind kind) : backendKind_(kind) {}
-  DeviceConfig(BackendKind kind, std::string name)
-      : backendKind_(kind), name_(name) {}
+  DeviceConfig(llvm::StringRef backendName) : backendName(backendName) {}
+  DeviceConfig(llvm::StringRef backendName, llvm::StringRef name)
+      : backendName(backendName), name(name) {}
 
-  BackendKind getBackendKind() { return backendKind_; }
+  DeviceConfig(llvm::StringRef backendName, llvm::StringRef name,
+               llvm::StringMap<std::string> parameters)
+      : backendName(backendName), name(name), parameters(parameters) {}
 
-  llvm::StringRef getName() const { return name_; }
-  bool hasName() const { return name_ != ""; }
-  void setName(llvm::StringRef name) { name_ = name; }
+  bool hasName() const { return name != ""; }
+
+  void setDeviceMemory(uint64_t memSize) { deviceMemory = memSize; }
+
+  uint64_t getDeviceMemory() const { return deviceMemory; }
+
+  uint64_t getDeviceMemory(uint64_t defaultMemory) const {
+    return deviceMemory == 0 ? defaultMemory : deviceMemory;
+  }
+};
+
+/// Options configuring Host components of the Runtime, such as the Partitioner
+/// and Executor.
+struct HostConfig {
+  /// Number of outstanding or concurrent networks before rate limiting.
+  size_t maxActiveRequests{100};
+  /// Number of threads to allocate to the Executor.
+  size_t executorThreads{3};
 };
 
 } // namespace runtime

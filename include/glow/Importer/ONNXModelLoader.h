@@ -62,9 +62,6 @@ class ONNXModelLoader
   /// ONNX model op_version;
   size_t opsetVersion_;
 
-  /// Mapping between ONNX names for inputs and actual Glow input vars.
-  llvm::StringMap<Placeholder *> onnxNameToInputVars_;
-
   /// Load Constant ONNX operator.
   llvm::Error loadConstant(const ONNX_NAMESPACE::NodeProto &op,
                            const ArgumentDictionaryTy &dict);
@@ -127,6 +124,18 @@ class ONNXModelLoader
   llvm::Error loadLeakyRelu(const ONNX_NAMESPACE::NodeProto &op,
                             const ArgumentDictionaryTy &dict);
 
+  /// Load SpaceToDepth ONNX operator.
+  llvm::Error loadSpaceToDepth(const ONNX_NAMESPACE::NodeProto &op,
+                               const ArgumentDictionaryTy &dict);
+
+  /// Load ConstantOfShape ONNX operator.
+  llvm::Error loadConstantOfShape(const ONNX_NAMESPACE::NodeProto &op,
+                                  const ArgumentDictionaryTy &dict);
+
+  /// Load Tile ONNX operator.
+  llvm::Error loadTile(const ONNX_NAMESPACE::NodeProto &op,
+                       const ArgumentDictionaryTy &dict);
+
 protected:
   /// Load the network operators from the GraphProto.
   /// \returns Error if network cannot be loaded.
@@ -147,19 +156,6 @@ protected:
 
   /// Load the network initializers from the GraphProto.
   llvm::Error loadInitializers(ONNX_NAMESPACE::GraphProto &net);
-
-  friend class ONNXIFIModelLoader;
-
-public:
-  /// Creates a ONNX model loader to build \p F.
-  /// If \p errPtr is not null then if an error occurs it will get assigned
-  /// there otherwise if an error occurs it will abort.
-  ONNXModelLoader(Function &F, llvm::Error *errPtr = nullptr);
-
-  /// \returns mapping between ONNX names and actual Glow input vars.
-  const llvm::StringMap<Placeholder *> &getInputVarsMapping() const {
-    return onnxNameToInputVars_;
-  }
 
   /// Load the inputs from the GraphProto. If \p loadInputsAsPlaceholders is
   /// true then this will load each graph input as a placeholder otherwise it
@@ -187,10 +183,29 @@ public:
                           llvm::ArrayRef<const char *> tensorNames,
                           llvm::ArrayRef<TypeRef> types);
 
+  /// Creates a ONNX model loader to build \p F.
+  /// Loads the ONNIXFI \p model from memory of \p modelSize size,
+  /// and \p weightsCount, and \p onnxTensorDescriptorV1 correspondent
+  /// descriptors. Converts inputs into placeholder if requested \p
+  /// loadInputsAsPlaceholders. Reports success/failure through optional
+  /// parameter \p errPtr.
+  ONNXModelLoader(const void *model, uint32_t modelSize, uint32_t weightsCount,
+                  const onnxTensorDescriptorV1 *weightDescriptors, Function &F,
+                  bool loadInputsAsPlaceholders, llvm::Error *errPtr = nullptr);
+
+  friend class ONNXIFIModelLoader;
+
+public:
+  /// Creates a ONNX model loader to build \p F.
+  /// If \p errPtr is not null then if an error occurs it will get assigned
+  /// there otherwise if an error occurs it will abort.
+  ONNXModelLoader(Function &F, llvm::Error *errPtr = nullptr);
+
   /// Loads the ONNX model that's represented by a model description file,
   /// serialized in \p modelDescFilename and populates the network into \p F.
   /// The types in \p types match the list of names \p tensorNames and used as
   /// inputs to the network.
+  /// If \p names and \p types are empty loader fills inputs automatically.
   /// If \p errPtr is not null then if an error occurs it will get assigned
   /// there otherwise if an error occurs it will abort.
   ONNXModelLoader(const std::string &modelDescFilename,

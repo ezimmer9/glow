@@ -28,7 +28,7 @@
 using namespace glow;
 using llvm::isa;
 
-class TestRunnerBase : public ::testing::TestWithParam<BackendKind> {
+class TestRunnerBase : public ::testing::TestWithParam<std::string> {
 public:
   ExecutionEngine EE_{GetParam()};
 };
@@ -550,29 +550,29 @@ TEST_P(MLTest, learnSingleValueConcat) {
 }
 
 void buildGRU(PlaceholderBindings &bindings, Function *F,
-              const std::vector<Node *> &slicesX, unsigned hiddenSize,
+              const std::vector<NodeValue> &slicesX, unsigned hiddenSize,
               unsigned outputSize, std::vector<NodeValue> &outputs) {
   return F->createGRU(bindings, "GRU", slicesX, 1, hiddenSize, outputSize,
                       outputs);
 };
 
 void buildRNN(PlaceholderBindings &bindings, Function *F,
-              const std::vector<Node *> &slicesX, unsigned hiddenSize,
+              const std::vector<NodeValue> &slicesX, unsigned hiddenSize,
               unsigned outputSize, std::vector<NodeValue> &outputs) {
   return F->createSimpleRNN(bindings, "SimpleRNN", slicesX, 1, hiddenSize,
                             outputSize, outputs);
 };
 
 void buildLSTM(PlaceholderBindings &bindings, Function *F,
-               const std::vector<Node *> &slicesX, unsigned hiddenSize,
+               const std::vector<NodeValue> &slicesX, unsigned hiddenSize,
                unsigned outputSize, std::vector<NodeValue> &outputs) {
   return F->createLSTM(bindings, "LSTM", slicesX, 1, hiddenSize, outputSize,
                        outputs);
 };
 
 using TCellGenerator = void (*)(PlaceholderBindings &, Function *,
-                                const std::vector<Node *> &, unsigned, unsigned,
-                                std::vector<NodeValue> &);
+                                const std::vector<NodeValue> &, unsigned,
+                                unsigned, std::vector<NodeValue> &);
 
 void testRNNCell(TCellGenerator cell) {
   TrainingConfig TC;
@@ -601,7 +601,7 @@ void testRNNCell(TCellGenerator cell) {
   bindings.allocate(Y);
 
   // Extract a slice for each input.
-  std::vector<Node *> XSliced;
+  std::vector<NodeValue> XSliced;
 
   for (unsigned i = 0; i < NumVectors; ++i) {
     std::string Name{"X"};
@@ -1010,7 +1010,7 @@ static void generateImageData(Tensor &images, Tensor &labels, PseudoRNG &PRNG) {
 /// Use a simple convnet to learn two classes of images: Line and Cross.
 /// This test checks the results of the quantized network.
 TEST_P(InterpreterAndCPU, convNetForImageRecognition) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{"Interpreter"};
   const unsigned numSamples = 500;
   const unsigned batchSize = 7;
   PlaceholderBindings bindings;
@@ -1053,40 +1053,31 @@ TEST_P(InterpreterAndCPU, convNetForImageRecognition) {
   // Training:
   runBatch(EE, bindings, 500, sampleCounter, {input, ex}, {&images, &labels});
 
-  // Lower everything before profiling. The loweredMap will be used when
-  // generating the profile to ensure all lowered components' profiles are
-  // contained.
   LoweredInfoMap loweredMapForProf;
-  Function *PF = F->clone("profile");
-  lower(PF, &loweredMapForProf);
+  CompilationContext cctxProf{&bindings, &loweredMapForProf};
+  cctxProf.precisionConfig.quantMode = QuantizationMode::Profile;
 
-  // Profiling:
-  glow::profileQuantization(bindings, PF);
-  EE.compile(CompilationMode::Infer, PF);
+  Function *PF = F->clone("profile");
+  EE.compile(PF, cctxProf);
   runBatch(EE, bindings, 100, sampleCounter, {input}, {&images});
 
   // Evaluate on the quantized function:
   // Set the execution backend to the backend that we test.
   EE.setBackend(GetParam());
 
-  // Get the quantization infos.
-  quantization::QuantizationConfiguration quantConfig{
-      quantization::generateNodeQuantizationInfos(bindings, PF,
-                                                  loweredMapForProf)};
-  quantConfig.assertAllNodesQuantized = true;
+  LoweredInfoMap loweredMapForQuant;
+  CompilationContext cctxQuant{&bindings, &loweredMapForQuant};
+  PrecisionConfiguration &precConfig = cctxQuant.precisionConfig;
+  cctxQuant.precisionConfig.quantMode = QuantizationMode::Quantize;
+  precConfig.quantConfig.infos = quantization::generateNodeQuantizationInfos(
+      bindings, PF, loweredMapForProf);
+  precConfig.quantConfig.assertAllNodesQuantized = true;
 
   // Softmax is not supported in Int8QTy, so signal the quantizer it's OK to
   // keep it unquantized.
-  KindSet doNotQuantizeKinds;
-  doNotQuantizeKinds.insert(Kinded::Kind::SoftMaxNodeKind);
+  precConfig.precisionModeKindSet.insert(Kinded::Kind::SoftMaxNodeKind);
 
-  // Build the new quantized graph.
-  LoweredInfoMap loweredMapForQuant;
-  lower(F, &loweredMapForQuant, EE.getBackend());
-  quantization::quantizeFunction(F, quantConfig, *EE.getBackend(),
-                                 loweredMapForQuant, doNotQuantizeKinds);
-
-  EE.compile(CompilationMode::Infer, F);
+  EE.compile(F, cctxQuant);
 
   // Generate the images used for testing.
   Tensor testImages(ElemKind::FloatTy, {batchSize, 8, 8, 1});
@@ -1126,7 +1117,7 @@ static void generateRegressionTestData(Tensor &images, Tensor &labels,
 /// This is the "Where's Waldo" test. We place a pixel in a tensor and the
 /// network reports the coordinate of the pixel.
 TEST_P(InterpreterAndCPU, testFindPixelRegression) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{"Interpreter"};
   PlaceholderBindings bindings;
 
   const unsigned numSamples = 1000;
@@ -1175,16 +1166,12 @@ TEST_P(InterpreterAndCPU, testFindPixelRegression) {
 
   // -- STEP2 - Profile and quantize the network. --
 
-  // Lower everything before profiling. The loweredMap will be used when
-  // generating the profile to ensure all lowered components' profiles are
-  // contained.
   LoweredInfoMap loweredMapForProf;
-  Function *PF = F->clone("profile");
-  lower(PF, &loweredMapForProf);
+  CompilationContext cctxProf{&bindings, &loweredMapForProf};
+  cctxProf.precisionConfig.quantMode = QuantizationMode::Profile;
 
-  // Profile the fully lowered 'F', 'PF'.
-  glow::profileQuantization(bindings, PF);
-  EE.compile(CompilationMode::Infer, PF);
+  Function *PF = F->clone("profile");
+  EE.compile(PF, cctxProf);
 
   // Run the graph to capture the profile.
   runBatch(EE, bindings, 100, sampleCounter, {input}, {&images});
@@ -1194,19 +1181,17 @@ TEST_P(InterpreterAndCPU, testFindPixelRegression) {
   // Set the execution backend to the backend that we test.
   EE.setBackend(GetParam());
 
-  // Get quantization infos.
-  quantization::QuantizationConfiguration quantConfig{
-      quantization::generateNodeQuantizationInfos(bindings, PF,
-                                                  loweredMapForProf)};
-  quantConfig.assertAllNodesQuantized = true;
-
-  // Build the new quantized graph.
   LoweredInfoMap loweredMapForQuant;
-  lower(F, &loweredMapForQuant, EE.getBackend());
-  quantization::quantizeFunction(F, quantConfig, *EE.getBackend(),
-                                 loweredMapForQuant);
+  CompilationContext cctxQuant{&bindings, &loweredMapForQuant};
+  cctxQuant.precisionConfig.quantMode = QuantizationMode::Quantize;
+  cctxQuant.loweredInfoMap = &loweredMapForQuant;
+  cctxQuant.bindings = &bindings;
+  cctxQuant.precisionConfig.quantConfig.infos =
+      quantization::generateNodeQuantizationInfos(bindings, PF,
+                                                  loweredMapForProf);
+  cctxQuant.precisionConfig.quantConfig.assertAllNodesQuantized = true;
 
-  EE.compile(CompilationMode::Infer, F);
+  EE.compile(F, cctxQuant);
 
   // Generate the images used for testing.
   Tensor testImages(ElemKind::FloatTy, {batchSize, 10, 10, 1});
@@ -1405,7 +1390,7 @@ TEST_P(MLTest, matrixRotationRecognition) {
 
 /// Simple test case that learns the embedding table for a
 /// SparseLengthsWeightedSum operator.
-TEST_P(InterpreterAndCPU, learnSparseLengthsWeightedSum) {
+TEST_P(MLTest, learnSparseLengthsWeightedSumEmbeddings) {
   TrainingConfig TC;
   TC.learningRate = 0.3;
   TC.batchSize = 1;
@@ -1476,19 +1461,89 @@ TEST_P(InterpreterAndCPU, learnSparseLengthsWeightedSum) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(Interpreter, MLTest,
-                        ::testing::Values(BackendKind::Interpreter));
+/// Simple test case that learns the weights for a
+/// SparseLengthsWeightedSum operator.
+TEST_P(MLTest, learnSparseLengthsWeightedSumWeights) {
+  TrainingConfig TC;
+  TC.learningRate = 0.001;
+  TC.batchSize = 1;
+
+  PlaceholderBindings bindings;
+
+  Module &mod = EE_.getModule();
+  PseudoRNG &PRNG = mod.getPRNG();
+
+  // Create a model consisting of one SparseLengthsWeightedSum operator followed
+  // by a Regression node to get some non-zero gradients.
+  Function *F = mod.createFunction("SparseLengthsWeightedSum");
+  Placeholder *dataP = mod.createPlaceholder(ElemKind::FloatTy, {10}, "dataP",
+                                             /*isTrainable=*/false);
+  Placeholder *indicesP = mod.createPlaceholder(
+      ElemKind::Int64ITy, {10}, "indicesP", /*isTrainable=*/false);
+  Placeholder *weightsP = mod.createPlaceholder(
+      ElemKind::FloatTy, {10}, "weightsP", /*isTrainable=*/true);
+  Placeholder *lengthsP = mod.createPlaceholder(
+      ElemKind::Int32ITy, {5}, "lengthsP", /*isTrainable=*/false);
+  Placeholder *expectedP = mod.createPlaceholder(
+      ElemKind::FloatTy, {5}, "expectedP", /*isTrainable=*/false);
+
+  auto *SLWS = F->createSparseLengthsWeightedSum("SLWS", dataP, weightsP,
+                                                 indicesP, lengthsP);
+  auto *reg = F->createRegression("reg", SLWS, expectedP);
+  auto *result = F->createSave("save", reg);
+
+  // Allocate and set embeddings.
+  bindings.allocate(dataP)->getHandle() = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  // Allocate and set indices such that input embeddings are reversed.
+  bindings.allocate(indicesP)->getHandle<int64_t>() = {9, 8, 7, 6, 5,
+                                                       4, 3, 2, 1, 0};
+  // Allocate and randomly initialize weights.
+  auto WH = bindings.allocate(weightsP)->getHandle();
+  WH.randomize(-1.0, 1.0, PRNG);
+
+  // Allocate and set lengths.
+  bindings.allocate(lengthsP)->getHandle<int32_t>() = {2, 2, 2, 2, 2};
+
+  // Allocate and set expected outputs. The weighs will be adjusted
+  // during training so that the final result is this.
+  auto EH = bindings.allocate(expectedP)->getHandle();
+  EH = {10, 7, 6, 3, 2};
+
+  // Allocate and store a handle to the result for testing later.
+  auto RH = bindings.allocate(result->getPlaceholder())->getHandle();
+
+  // Train the network.
+  Function *trainingGradientFunction = glow::differentiate(F, TC);
+  EE_.compile(CompilationMode::Train, trainingGradientFunction);
+
+  const size_t numIterations = 1000;
+
+  for (size_t i = 0; i < numIterations; ++i) {
+    EE_.run(bindings);
+  }
+
+  // Switch to inference mode and run the network.
+  EE_.compile(CompilationMode::Infer, F);
+  EE_.run(bindings);
+
+  // Make sure that the network output matches expectations after training.
+  for (size_t j = 0; j < EH.size(); ++j) {
+    EXPECT_NEAR(RH.raw(j), EH.raw(j), 0.02);
+  }
+}
+
+INSTANTIATE_TEST_CASE_P(Interpreter, MLTest, ::testing::Values("Interpreter"));
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(JIT, MLTest, ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(JIT, MLTest, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU
 
 #ifdef GLOW_WITH_OPENCL
-INSTANTIATE_TEST_CASE_P(OpenCL, MLTest, ::testing::Values(BackendKind::OpenCL));
+INSTANTIATE_TEST_CASE_P(OpenCL, MLTest, ::testing::Values("OpenCL"));
 #endif // GLOW_WITH_OPENCL
 
 INSTANTIATE_TEST_CASE_P(Interpreter, InterpreterAndCPU,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(JIT, InterpreterAndCPU,
-                        ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(JIT, InterpreterAndCPU, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU

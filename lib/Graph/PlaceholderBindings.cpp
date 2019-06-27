@@ -17,6 +17,9 @@
 #include "glow/Graph/PlaceholderBindings.h"
 #include "glow/Base/Tensor.h"
 #include "glow/Graph/Nodes.h"
+#include "glow/Support/TensorPool.h"
+
+#include <glog/logging.h>
 
 using namespace glow;
 
@@ -47,7 +50,9 @@ bool PlaceholderBindings::compare(const PlaceholderBindings *A,
     const auto *tensorB =
         B->get(B->getPlaceholderByName(placeholder->getName()));
 
-    if (!tensorA || !tensorB || !tensorA->isEqual(*tensorB)) {
+    if (!tensorA || !tensorB ||
+        !tensorA->isEqual(*tensorB, /* allowedError */ 0.0001,
+                          /* verbose */ false)) {
       return false;
     }
   }
@@ -75,26 +80,59 @@ PlaceholderBindings::getPlaceholderByName(llvm::StringRef name) const {
 }
 
 void PlaceholderBindings::insert(Placeholder *P, Tensor &&T) {
-  assert(!map_.count(P) && "Placeholder already registered");
+  DCHECK(T.getType().isEqual(*P->getType()))
+      << "Placeholder " << P->getName().str() << " has type "
+      << P->getType()->toString() << " but Tensor has type "
+      << T.getType().toString() << "\n";
+  DCHECK(!map_.count(P)) << "Placeholder with name \"" << P->getName().str()
+                         << "\" already registered";
   // Take ownership over the tensor.
-  map_[P] = new Tensor(std::move(T));
+  Tensor *t = new Tensor(std::move(T));
+  map_[P] = t;
+  nameMap_[P->getName()] = P;
+}
+
+void PlaceholderBindings::insert(Placeholder *P, Tensor *T) {
+  DCHECK(!map_.count(P)) << "Placeholder with name \"" << P->getName().str()
+                         << "\" already registered";
+  map_[P] = T;
   nameMap_[P->getName()] = P;
 }
 
 size_t PlaceholderBindings::count(Placeholder *P) const {
-  assert((map_.size() == nameMap_.size()) &&
-         "Placeholder map and name map out of sync");
+  DCHECK_EQ(map_.size(), nameMap_.size())
+      << "Placeholder map and name map out of sync";
   return map_.count(P);
 }
 
 void PlaceholderBindings::clear() {
   // Delete all of the tensors that are owned by the bindings.
   for (auto PH : map_) {
-    delete PH.second;
+    if (auto *tensorPool = PH.second->getOwningPool()) {
+      tensorPool->reclaim(PH.second);
+    } else {
+      delete PH.second;
+    }
   }
 
   map_.clear();
   nameMap_.clear();
+}
+
+void PlaceholderBindings::erase(Placeholder *P) {
+  DCHECK(nameMap_.count(P->getName()))
+      << "Placeholder with name \"" << P->getName().str()
+      << "\" already registered";
+  nameMap_.erase(P->getName());
+
+  auto *T = map_[P];
+  if (auto *tensorPool = T->getOwningPool()) {
+    tensorPool->reclaim(T);
+  } else {
+    delete T;
+  }
+
+  map_.erase(P);
 }
 
 PlaceholderBindings PlaceholderBindings::clone() const {
@@ -109,8 +147,15 @@ PlaceholderBindings PlaceholderBindings::clone() const {
 }
 
 Tensor *PlaceholderBindings::allocate(Placeholder *P) {
-  assert(!map_.count(P) && "Placeholder already registered");
+  DCHECK(!map_.count(P)) << "Placeholder with name \"" << P->getName().str()
+                         << "\" already registered";
   Tensor *T = new Tensor(P->getType());
+
+  // If this Tensor needs to start zeroed, then zero it.
+  if (P->allocZero()) {
+    T->zero();
+  }
+
   map_[P] = T;
   nameMap_[P->getName()] = P;
   return T;
@@ -156,8 +201,8 @@ uint64_t PlaceholderBindings::getDataSize() const {
 PlaceholderBindings::PlaceholderBindings(
     llvm::ArrayRef<Placeholder *> placeholders,
     llvm::ArrayRef<Tensor *> inputs) {
-  assert(placeholders.size() == inputs.size() &&
-         "Invalid number of placeholders");
+  DCHECK_EQ(placeholders.size(), inputs.size())
+      << "Invalid number of placeholders";
 
   for (size_t i = 0, e = placeholders.size(); i < e; i++) {
     auto *orig = inputs[i];

@@ -38,9 +38,8 @@ llvm::raw_ostream &errs();
 llvm::raw_ostream &dbgs();
 
 /// Stream LLVM's ArrayRef into the given output stream.
-template <typename E>
-llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
-                              const llvm::ArrayRef<E> list) {
+template <typename Stream, typename E>
+Stream &operator<<(Stream &os, const llvm::ArrayRef<E> list) {
   os << '[';
   // Print the array without a trailing comma.
   for (size_t i = 0, e = list.size(); i < e; i++) {
@@ -57,6 +56,9 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 /// \returns the escaped content of string \p str.
 /// The char '\n' becomes '\'+'n' and quotes are handled correctly.
 std::string escapeDottyString(const std::string &str);
+
+/// \returns the node color based on \p index which is used in dot file.
+const char *getDotFileNodeColor(size_t index);
 
 /// Add quotes to the string \p in.
 inline std::string quote(const std::string &in) { return '"' + in + '"'; }
@@ -115,6 +117,31 @@ inline void report(llvm::StringRef str) { report(str.data()); }
 /// and constants should look like valid C identifiers. Therefore, those symbols
 /// can be inspected under debugger.
 std::string legalizeName(llvm::StringRef name);
+
+/// Data structure for multi string format used in yaml file.
+struct MultiLineStr {
+  std::string str;
+};
+
+/// Data structure used to read the yaml file for Device Configs.
+struct DeviceConfigHelper {
+  /// Device Name.
+  std::string name_;
+  /// Backend name.
+  std::string backendName_;
+  /// A string with multi lines. Each line represents a param.
+  MultiLineStr parameters_;
+  DeviceConfigHelper() = default;
+  DeviceConfigHelper(std::string &name, std::string &backendName)
+      : name_(name), backendName_(backendName) {}
+  DeviceConfigHelper(std::string &backendName, std::string &name,
+                     MultiLineStr &parameters)
+      : name_(name), backendName_(backendName), parameters_(parameters) {}
+};
+
+/// Deserialize quantization infos from the file \p fileName.
+std::vector<DeviceConfigHelper>
+deserializeDeviceConfigFromYaml(llvm::StringRef fileName);
 
 /// Printf-like formatting for std::string.
 const std::string strFormat(const char *format, ...)

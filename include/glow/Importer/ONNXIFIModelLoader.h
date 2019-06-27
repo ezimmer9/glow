@@ -27,20 +27,16 @@ namespace glow {
 
 class ONNXIFIModelLoader {
 private:
-  /// If \p errPtr is not null then if an error occurs it will get assigned
-  /// there otherwise if an error occurs it will abort.
-  explicit ONNXIFIModelLoader(llvm::Error *errPtr = nullptr) {}
+  /// Default constructor.
+  explicit ONNXIFIModelLoader() {}
 
   /// The real loader. It can be ONNXModelLoader or Caffe2ModelLoader
   std::unique_ptr<ProtobufLoader> core_{nullptr};
 
-  /// Mapping between ONNX names for inputs and actual Glow input vars.
-  llvm::StringMap<Placeholder *> onnxNameToInputVars_;
-
 public:
   /// \returns mapping between ONNX names and actual Glow input vars.
   const llvm::StringMap<Placeholder *> &getInputVarsMapping() const {
-    return onnxNameToInputVars_;
+    return core_->getInputVarsMapping();
   }
 
   /// \returns mapping between ONNX names and actual Glow output nodes.

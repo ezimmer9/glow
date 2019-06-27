@@ -128,6 +128,10 @@ void LLVMIRGen::initTargetMachine(
   assert(TM_ && "Could not initialize the target machine");
 }
 
+llvm::StringRef LLVMIRGen::getBundleName() const { return bundleName_; }
+
+void LLVMIRGen::setBundleName(const std::string &name) { bundleName_ = name; }
+
 std::string LLVMIRGen::getMainEntryName() const {
   return mainEntryName_.empty() ? "main" : mainEntryName_;
 }
@@ -142,7 +146,7 @@ void LLVMIRGen::loadBaseAddresses(llvm::IRBuilder<> &builder) {
   // Load the base addresses at the beginning of the entry function once they
   // are set. They won't change after this point and all relative addressing
   // computations will simply use them.
-  auto sizeTTy = builder.getIntNTy(getTargetSizeTWidth());
+  auto sizeTTy = builder.getIntNTy(getLibjitSizeTWidth());
   baseActivationsAddr_ = builder.CreatePtrToInt(F->args().begin() + 2, sizeTTy);
   baseConstantWeightVarsAddr_ =
       builder.CreatePtrToInt(F->args().begin(), sizeTTy);
@@ -184,7 +188,7 @@ void LLVMIRGen::initCodeGen() {
   instrNumbering_.reset(new InstructionNumbering(*F_));
   // Load the jit library as a new module.
   llmodule_ = loadStandardLibrary(&ctx_, "libjit.bc", libjitBC_);
-  GLOW_ASSERT(llmodule_.get() && "Unable to load the JIT library.");
+  CHECK(llmodule_.get()) << "Unable to load the JIT library.";
 
   // By default, LLVM would emit some diagnostics, remarks, etc. It is fine for
   // a static compiler, but not necessary for a JIT. Let's disable it by
@@ -198,7 +202,7 @@ void LLVMIRGen::initCodeGen() {
 
   // Create the entry function into the LLVM module.
   auto int8PtrTy = llvm::Type::getInt8PtrTy(ctx_);
-  auto sizeTPtrTy = llvm::Type::getIntNPtrTy(ctx_, getTargetSizeTWidth());
+  auto sizeTPtrTy = llvm::Type::getIntNPtrTy(ctx_, getLibjitSizeTWidth());
   // The entry point has the following API:
   // void entry(uint8_t *baseConstantWeightVars, uint8_t
   // *baseInoutWeightVars, uint8_t *baseActivations, size_t *offsets);
@@ -226,9 +230,11 @@ llvm::Type *LLVMIRGen::getElementType(llvm::IRBuilder<> &builder,
   case ElemKind::FloatTy:
     return builder.getFloatTy();
   case ElemKind::Float16Ty:
-    llvm_unreachable("Not yet implemented");
+    llvm_unreachable("Not implemented");
   case ElemKind::Int8QTy:
     return builder.getInt8Ty();
+  case ElemKind::UInt8QTy:
+    llvm_unreachable("Not implemented");
   case ElemKind::Int16QTy:
     return builder.getInt16Ty();
   case ElemKind::Int32QTy:
@@ -306,7 +312,7 @@ llvm::Value *LLVMIRGen::emitValueAddress(llvm::IRBuilder<> &builder,
                                          const glow::Value *val) {
   assert(allocationsInfo_.allocatedAddress_.count(val) &&
          "Value address was not allocated");
-  auto sizeTTy = builder.getIntNTy(getTargetSizeTWidth());
+  auto sizeTTy = builder.getIntNTy(getLibjitSizeTWidth());
   llvm::Type *T = nullptr;
 
   switch (val->getElementType()) {
@@ -369,7 +375,7 @@ llvm::Value *LLVMIRGen::emitValueAddress(llvm::IRBuilder<> &builder,
 llvm::Value *
 LLVMIRGen::emitConstOffsetsArray(llvm::IRBuilder<> &builder,
                                  const AllocationsInfo &allocationsInfo) {
-  auto sizeTType = builder.getIntNTy(getTargetSizeTWidth());
+  auto sizeTType = builder.getIntNTy(getLibjitSizeTWidth());
   std::vector<llvm::Constant *> elems(allocationsInfo.valueNumbers_.size());
   for (auto &I : allocationsInfo.valueNumbers_) {
     auto *V = I.first;
@@ -399,7 +405,7 @@ template <typename T>
 llvm::Value *LLVMIRGen::emitConstSizeTArray(llvm::IRBuilder<> &builder,
                                             llvm::ArrayRef<T> vals) {
   assert(std::is_integral<T>() && "Can only convert integral type to size_t.");
-  auto SizeTType = builder.getIntNTy(getTargetSizeTWidth());
+  auto SizeTType = builder.getIntNTy(getLibjitSizeTWidth());
   std::vector<llvm::Constant *> elems;
   for (auto I : vals) {
     assert(I >= 0 && "Only allow casting positive values into size_t.");
@@ -443,7 +449,7 @@ llvm::Value *LLVMIRGen::emitValueDims(llvm::IRBuilder<> &builder,
 
 llvm::Value *LLVMIRGen::emitValueSize(llvm::IRBuilder<> &builder,
                                       const glow::Value *val) {
-  return builder.getIntN(getTargetSizeTWidth(), val->size());
+  return builder.getIntN(getLibjitSizeTWidth(), val->size());
 }
 
 llvm::Value *LLVMIRGen::emitConstF32(llvm::IRBuilder<> &builder, float val) {
@@ -459,7 +465,7 @@ llvm::Value *LLVMIRGen::emitConstI8(llvm::IRBuilder<> &builder, int8_t val) {
 }
 
 llvm::Value *LLVMIRGen::emitConstSizeT(llvm::IRBuilder<> &builder, size_t val) {
-  return builder.getIntN(getTargetSizeTWidth(), val);
+  return builder.getIntN(getLibjitSizeTWidth(), val);
 }
 
 llvm::Value *LLVMIRGen::emitConst(llvm::IRBuilder<> &builder, float val,
@@ -468,11 +474,13 @@ llvm::Value *LLVMIRGen::emitConst(llvm::IRBuilder<> &builder, float val,
   case ElemKind::FloatTy:
     return llvm::ConstantFP::get(llvm::Type::getFloatTy(ctx_), val);
   case ElemKind::Float16Ty:
-    llvm_unreachable("No yet implemented");
+    llvm_unreachable("Not implemented");
   case ElemKind::Int64ITy:
     return builder.getInt64(static_cast<int64_t>(val));
   case ElemKind::Int8QTy:
     return builder.getInt8(static_cast<int8_t>(val));
+  case ElemKind::UInt8QTy:
+    llvm_unreachable("Not implemented");
   case ElemKind::Int16QTy:
     return builder.getInt16(static_cast<int16_t>(val));
   case ElemKind::Int32QTy:
@@ -504,12 +512,7 @@ void LLVMIRGen::markArgAsUnspecialized(llvm::Value *val) {
 
 llvm::Function *LLVMIRGen::getFunction(const std::string &name) {
   auto *F = llmodule_->getFunction("libjit_" + name);
-#ifndef NDEBUG
-  if (!F) {
-    llvm::errs() << "Unable to load the function: libjit_" << name << "\n";
-  }
-#endif
-  GLOW_ASSERT(F && "Unable to load the function");
+  CHECK(F) << "Unable to load the function: libjit_" << name;
   return F;
 }
 
@@ -517,12 +520,7 @@ llvm::Function *LLVMIRGen::getFunction(const std::string &name,
                                        ElemKind elemTy) {
   auto get = [this](llvm::StringRef funcName) {
     auto *F = llmodule_->getFunction(funcName);
-#ifndef NDEBUG
-    if (!F) {
-      llvm::errs() << "Unable to load the function: " << funcName << "\n";
-    }
-#endif
-    GLOW_ASSERT(F && "Unable to load the function");
+    CHECK(F) << "Unable to load the function: " << funcName.str();
     return F;
   };
   switch (elemTy) {
@@ -539,7 +537,8 @@ llvm::Function *LLVMIRGen::getFunction(const std::string &name,
   case ElemKind::BoolTy:
     return get("libjit_" + name + "_b");
   default:
-    GLOW_UNREACHABLE("Unsupported element type");
+    LOG(FATAL) << "Unsupported element type: "
+               << Type::getElementName(elemTy).str();
   }
 }
 
@@ -564,7 +563,7 @@ llvm::CallInst *LLVMIRGen::createCall(llvm::IRBuilder<> &builder,
 std::pair<llvm::BasicBlock *, llvm::BasicBlock *>
 LLVMIRGen::createLoop(llvm::IRBuilder<> &builder, llvm::LLVMContext &ctx,
                       llvm::Value *numElements) const {
-  auto sizeTTy = builder.getIntNTy(getTargetSizeTWidth());
+  auto sizeTTy = builder.getIntNTy(getLibjitSizeTWidth());
   auto *initVal = llvm::ConstantInt::get(sizeTTy, 0);
 
   // Make the new basic block for the loop header. Insert it after current
@@ -676,7 +675,8 @@ void LLVMIRGen::emitDataParallelKernelImpl(
   // instruction.
   for (auto &BI : bundle) {
     // Name of the stacked operation to be invoked.
-    assert(BI->isDataParallel() && "Data parallel operation is expected");
+    assert(canBePartOfDataParallelKernel(BI) &&
+           "Data parallel operation is expected");
     generateLLVMIRForDataParallelInstr(kernelBuilder, BI, kernelFunc,
                                        bufferToArgNum, kernelLoopIdx);
   }
@@ -786,12 +786,14 @@ void LLVMIRGen::generateLLVMIRForModule(llvm::IRBuilder<> &builder) {
   // instructions and emit them.
   llvm::SmallVector<const Instruction *, 32> bundle;
   for (auto &I : instrs) {
-    if (!I.isDataParallel()) {
+    if (!canBePartOfDataParallelKernel(&I)) {
       // Ignore memory management instructions as they are handled by the
       // MemoryManager and are NOPs for a JIT.
       if (isa<AllocActivationInst>(&I) || isa<DeallocActivationInst>(&I) ||
-          isa<TensorViewInst>(&I))
+          isa<TensorViewInst>(&I)) {
+        generateLLVMIRForInstr(builder, &I);
         continue;
+      }
       emitDataParallelKernel(builder, bundle);
       bundle.clear();
       generateLLVMIRForInstr(builder, &I);
@@ -845,7 +847,8 @@ void LLVMIRGen::generateLLVMIRForDataParallelInstr(
     llvm::Function *kernel, llvm::DenseMap<Value *, int> &bufferToArgNum,
     llvm::Value *loopCount) {
   setCurrentDebugLocation(builder, I);
-  assert(I->isDataParallel() && "Expected a data parallel instruction");
+  assert(canBePartOfDataParallelKernel(I) &&
+         "Instruction cannot be part of a data parallel kernel");
   switch (I->getKind()) {
 
 #define ARITHMETIC_UNARY_OP_WITH_IMM_CASE(INST_NAME_, FUN_NAME_, VALUE_)       \
@@ -984,6 +987,8 @@ void LLVMIRGen::generateLLVMIRForDataParallelInstr(
     ARITHMETIC_UNARY_OP_CASE(Sigmoid, "sigmoid");
     ARITHMETIC_UNARY_OP_CASE(Tanh, "tanh");
     ARITHMETIC_UNARY_OP_CASE(ElementLog, "element_log");
+    ARITHMETIC_UNARY_OP_CASE(ElementExp, "element_exp");
+
 #undef ARITHMETIC_UNARY_OP_CASE
 
   case Kinded::Kind::ElementIsNaNInstKind: {
@@ -1022,7 +1027,7 @@ void LLVMIRGen::generateLLVMIRForDataParallelInstr(
       destAddr = builder.CreateGEP(builder.getInt32Ty(), destPtr, loopCount,
                                    "buffer.element.addr");
     } else {
-      GLOW_UNREACHABLE("Type is not supported.");
+      LOG(FATAL) << "Type is not supported";
     }
 
     builder.CreateStore(stackedOpCall, destAddr);
@@ -1329,19 +1334,17 @@ void LLVMIRGen::generateLLVMIRForDataParallelInstr(
   }
 
   default:
-#ifndef NDEBUG
-    llvm::errs() << "Cannot select the instruction:\n";
-    I->dump(llvm::errs());
-    llvm::errs() << "\n";
-#endif
-    GLOW_UNREACHABLE("ERROR: Cannot select the instruction.");
+    std::string sBuf;
+    llvm::raw_string_ostream s(sBuf);
+    I->dump(s);
+    LOG(FATAL) << "Cannot select the instruction: " << s.str();
   }
 }
 
 void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
                                        const glow::Instruction *I) {
   setCurrentDebugLocation(builder, I);
-  assert(!I->isDataParallel() &&
+  assert((!canBePartOfDataParallelKernel(I)) &&
          "data parallel instructions are not handled here");
   switch (I->getKind()) {
   case Kinded::Kind::MatMulInstKind: {
@@ -1422,8 +1425,7 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
         break;
       }
     }
-    GLOW_ASSERT(scalesT.getUnsafePtr() != nullptr &&
-                "Can't find the variable.");
+    CHECK(scalesT.getUnsafePtr()) << "Can't find the variable.";
 
     auto scalesH = scalesT.getHandle();
     size_t rowNum = scalesH.dims()[0];
@@ -1555,7 +1557,8 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
       } else if (sliceTy->getElementType() == ElemKind::Int32QTy) {
         F = getFunction("batchedadd_i32", dest->getElementType());
       } else {
-        GLOW_UNREACHABLE("Type is not supported.");
+        LOG(FATAL) << "Type is not supported: "
+                   << Type::getElementName(sliceTy->getElementType()).str();
       }
       createCall(builder, F,
                  {destPtr, batchPtr, slicePtr, numSlice, sliceSize, destOffset,
@@ -1638,6 +1641,7 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     auto *strides = emitConstSizeTArray(builder, CI->getStrides());
     auto *pads = emitConstSizeTArray(builder, CI->getPads());
     auto *group = emitConstSizeT(builder, CI->getGroup());
+    auto *dilation = emitConstSizeT(builder, CI->getDilation());
 
     const char *kernelName = "convolution";
 
@@ -1694,12 +1698,12 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
                   srcDims,    filterDims, biasDims,   kernels,   strides,
                   pads,       group,      destOffset, srcOffset, filterOffset,
                   biasOffset, biasPre,    biasPost,   biasScale, outPre,
-                  outPost,    outScale,   unrollD});
+                  outPost,    outScale,   unrollD,    dilation});
     } else {
       createCall(builder, F,
                  {destPtr, srcPtr, filterPtr, biasPtr, destDims, srcDims,
-                  filterDims, biasDims, kernels, strides, pads, group,
-                  unrollD});
+                  filterDims, biasDims, kernels, strides, pads, group, unrollD,
+                  dilation});
     }
     break;
   }
@@ -1725,12 +1729,13 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     auto *strides = emitConstSizeTArray(builder, CG->getStrides());
     auto *pads = emitConstSizeTArray(builder, CG->getPads());
     auto *group = emitConstSizeT(builder, CG->getGroup());
+    auto *dilation = emitConstSizeT(builder, CG->getDilation());
 
     auto *F = getFunction("convolution_grad", srcGrad->getElementType());
     createCall(builder, F,
                {srcGradPtr, destGradPtr, srcPtr, filterGradPtr, biasGradPtr,
                 filterPtr, destGradDims, srcDims, filterGradDims, kernels,
-                strides, pads, group});
+                strides, pads, group, dilation});
     break;
   }
 
@@ -2003,6 +2008,26 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     break;
   }
 
+  case Kinded::Kind::SpaceToDepthInstKind: {
+    auto *SI = cast<SpaceToDepthInst>(I);
+    auto *dest = SI->getDest();
+    auto *src = SI->getSrc();
+
+    auto *dstPtr = emitValueAddress(builder, dest);
+    auto *srcPtr = emitValueAddress(builder, src);
+
+    auto *dstDims = emitValueDims(builder, dest);
+    auto *srcDims = emitValueDims(builder, src);
+
+    unsigned blockSize = SI->getBlockSize();
+
+    auto *F = getFunction("space_to_depth", src->getElementType());
+    createCall(
+        builder, F,
+        {srcPtr, dstPtr, emitConstSizeT(builder, blockSize), srcDims, dstDims});
+    break;
+  }
+
   case Kinded::Kind::TransposeInstKind: {
     auto *TI = cast<TransposeInst>(I);
     auto *dest = TI->getDest();
@@ -2176,6 +2201,22 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     break;
   }
 
+  case Kinded::Kind::LengthsRangeFillInstKind: {
+    auto *LRFI = llvm::cast<LengthsRangeFillInst>(I);
+    auto *dest = LRFI->getDest();
+    auto *lengths = LRFI->getLengths();
+
+    auto *destPtr = emitValueAddress(builder, dest);
+    auto *lengthsPtr = emitValueAddress(builder, lengths);
+
+    auto *lengthsSize = emitConstSizeT(builder, lengths->size());
+
+    // Dispatching function depending on the input type of Ranges.
+    auto *F = getFunction("lengths_range_fill", dest->getElementType());
+    createCall(builder, F, {lengthsPtr, destPtr, lengthsSize});
+    break;
+  }
+
   case Kinded::Kind::ScatterAssignInstKind: {
     auto *SAI = llvm::cast<ScatterAssignInst>(I);
     auto *data = SAI->getData();
@@ -2195,6 +2236,24 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     auto *F = getFunction("scatterassign", data->getElementType());
     createCall(builder, F,
                {dataPtr, indicesPtr, slicesPtr, indicesSize, sliceSize});
+    break;
+  }
+
+  case Kinded::Kind::SparseLengthsSumInstKind: {
+    auto *SI = cast<SparseLengthsSumInst>(I);
+    auto *dest = SI->getDest();
+    auto *data = SI->getData();
+    auto *indices = SI->getIndices();
+    auto *lengths = SI->getLengths();
+    auto *destPtr = emitValueAddress(builder, dest);
+    auto *dataPtr = emitValueAddress(builder, data);
+    auto *indicesPtr = emitValueAddress(builder, indices);
+    auto *lengthsPtr = emitValueAddress(builder, lengths);
+    auto *segments = emitConstSizeT(builder, lengths->dims()[0]);
+    auto *lineSize = emitConstSizeT(builder, data->size() / data->dims()[0]);
+    auto *F = getFunction("sparse_lengths_sum", dest->getElementType());
+    createCall(builder, F,
+               {destPtr, dataPtr, indicesPtr, lengthsPtr, segments, lineSize});
     break;
   }
 
@@ -2224,11 +2283,15 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     auto *SI = cast<SparseLengthsWeightedSumGradInst>(I);
     auto *destGrad = SI->getDestGrad();
     auto *dataGrad = SI->getDataGrad();
+    auto *weightsGrad = SI->getWeightsGrad();
+    auto *data = SI->getData();
     auto *weights = SI->getWeights();
     auto *indices = SI->getIndices();
     auto *lengths = SI->getLengths();
     auto *destGradPtr = emitValueAddress(builder, destGrad);
     auto *dataGradPtr = emitValueAddress(builder, dataGrad);
+    auto *weightsGradPtr = emitValueAddress(builder, weightsGrad);
+    auto *dataPtr = emitValueAddress(builder, data);
     auto *weightsPtr = emitValueAddress(builder, weights);
     auto *indicesPtr = emitValueAddress(builder, indices);
     auto *lengthsPtr = emitValueAddress(builder, lengths);
@@ -2240,8 +2303,8 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
     auto *F = getFunction("sparse_lengths_weighted_sum_grad",
                           destGrad->getElementType());
     createCall(builder, F,
-               {destGradPtr, dataGradPtr, weightsPtr, indicesPtr, lengthsPtr,
-                segments, lineSize, dataGradRawSize});
+               {destGradPtr, dataGradPtr, weightsGradPtr, dataPtr, weightsPtr,
+                indicesPtr, lengthsPtr, segments, lineSize, dataGradRawSize});
     break;
   }
 
@@ -2345,12 +2408,10 @@ void LLVMIRGen::generateLLVMIRForInstr(llvm::IRBuilder<> &builder,
   }
 
   default:
-#ifndef NDEBUG
-    llvm::errs() << "Cannot select the instruction:\n";
-    I->dump(llvm::errs());
-    llvm::errs() << "\n";
-#endif
-    GLOW_UNREACHABLE("ERROR: Cannot select the instruction.");
+    std::string sBuf;
+    llvm::raw_string_ostream s(sBuf);
+    I->dump(s);
+    LOG(FATAL) << "Cannot select the instruction: " << s.str();
   }
 }
 
@@ -2358,6 +2419,18 @@ unsigned LLVMIRGen::getTargetSizeTWidth() const {
   return getPointerNumBits(*TM_);
 }
 
+unsigned LLVMIRGen::getLibjitSizeTWidth() const {
+  auto *sizeTVar = getModule().getGlobalVariable("libjit_sizeTVar",
+                                                 /* allowInternal */ true);
+  assert(sizeTVar && "libjit_sizeTVar is not found");
+  return sizeTVar->getType()->getPointerElementType()->getIntegerBitWidth();
+}
+
 bool LLVMIRGen::isEligibleForSpecialization(const llvm::CallInst *call) {
   return true;
+}
+
+bool LLVMIRGen::canBePartOfDataParallelKernel(
+    const glow::Instruction *I) const {
+  return I->isDataParallel();
 }

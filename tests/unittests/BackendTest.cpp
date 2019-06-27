@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "glow/Backends/BackendUtils.h"
+#include "glow/Backend/BackendUtils.h"
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Graph/PlaceholderBindings.h"
@@ -27,31 +27,22 @@
 
 using namespace glow;
 
-class BackendTest : public ::testing::TestWithParam<BackendKind> {
+/// An enum to indicate what type placholder it is.
+enum class PlaceholderType {
+  InputPlaceholder = 0,
+  InputOutputPlaceholder = 1,
+  OutputPlaceholder = 2,
+  NonePlaceholder = 3
+};
+
+class BackendTest : public ::testing::TestWithParam<std::string> {
 public:
   ExecutionEngine EE_{GetParam()};
 };
 
-TEST(Interpreter, NotImplementedSave) {
-  // Interpreter backend does not support a save method.
-  // Exercise it and make sure that it fails.
-  ExecutionEngine EE;
-  PlaceholderBindings ctx;
-  auto &mod = EE.getModule();
-
-  // Create a few nodes to make sure IR can be normally generated.
-  Function *F = mod.createFunction("main");
-  F->createSave("save",
-                mod.createPlaceholder(ElemKind::FloatTy, {2}, "A", false));
-
-  CompilationContext cctx;
-  cctx.mode = CompilationMode::Infer;
-  EXPECT_DEATH(EE.save(F, cctx, "output", "network"), "");
-}
-
 TEST(Interpreter, profileQuantizationForANetwork) {
   ExecutionEngine EE;
-  PlaceholderBindings ctx;
+  PlaceholderBindings bindings;
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
   Tensor inputs(ElemKind::FloatTy, {1, 4});
@@ -59,20 +50,22 @@ TEST(Interpreter, profileQuantizationForANetwork) {
 
   auto *A = mod.createPlaceholder(ElemKind::FloatTy, {1, 4}, "A", false);
   auto *Ex = mod.createPlaceholder(ElemKind::FloatTy, {1, 4}, "E", false);
-  Node *O = F->createFullyConnected(ctx, "fc", A, 4);
+  Node *O = F->createFullyConnected(bindings, "fc", A, 4);
   O = F->createRELU("relu", O);
   O = F->createRegression("reg", O, Ex);
 
-  ::glow::profileQuantization(ctx, F);
+  LoweredInfoMap loweredMap;
+  CompilationContext cctx{&bindings, &loweredMap};
+  cctx.precisionConfig.quantMode = QuantizationMode::Profile;
 
-  ctx.allocate(A);
-  ctx.allocate(Ex);
-  EE.compile(CompilationMode::Infer, F);
+  bindings.allocate(A);
+  bindings.allocate(Ex);
+  EE.compile(F, cctx);
 
   // TODO: Verify histogram itself, for now just verify min and max.
   // Run inference first time and capture tensor stats.
-  updateInputPlaceholders(ctx, {A}, {&inputs});
-  EE.run(ctx);
+  updateInputPlaceholders(bindings, {A}, {&inputs});
+  EE.run(bindings);
 
   QuantizationProfileNode *profile{nullptr};
   // Find QPN for node A.
@@ -89,8 +82,8 @@ TEST(Interpreter, profileQuantizationForANetwork) {
 
   EXPECT_TRUE(profile != nullptr);
 
-  auto CI =
-      ctx.get(profile->getComputationInfoPlaceholder())->getHandle<float>();
+  auto CI = bindings.get(profile->getComputationInfoPlaceholder())
+                ->getHandle<float>();
   float min = CI.raw(0);
   float max = CI.raw(1);
   EXPECT_NEAR(0.5, min, 0.00001);
@@ -98,8 +91,8 @@ TEST(Interpreter, profileQuantizationForANetwork) {
 
   // Run inference for the second time with new min and max.
   inputs.getHandle() = {0.2f, 1.6f, 0.5f, 1.3f};
-  updateInputPlaceholders(ctx, {A}, {&inputs});
-  EE.run(ctx);
+  updateInputPlaceholders(bindings, {A}, {&inputs});
+  EE.run(bindings);
   min = CI.raw(0);
   max = CI.raw(1);
   EXPECT_NEAR(0.2, min, 0.00001);
@@ -163,9 +156,86 @@ TEST(RuntimeBundle, BundleSymbolInfo) {
   EXPECT_EQ(table.find("tensorview_reshape")->second.output, false);
 }
 
+// Test if the placeholders are allocated contiguously as
+// Input|InputOutput|Output.
+TEST(RuntimeBundle, ContiguousPlaceholder) {
+  ExecutionEngine EE;
+  PlaceholderBindings bindings;
+  auto &mod = EE.getModule();
+  Function *F = mod.createFunction("main");
+  Tensor inputs(ElemKind::FloatTy, {1, 4});
+  inputs.getHandle() = {1, 1.2f, 0.5f, 1.3f};
+
+  auto *A = mod.createPlaceholder(ElemKind::FloatTy, {1, 4}, "A", false);
+  auto *B = mod.createPlaceholder(ElemKind::FloatTy, {1, 4}, "B", false);
+  auto *Ex = mod.createPlaceholder(ElemKind::FloatTy, {1, 4}, "E", false);
+  auto *add = F->createAdd("add", A, Ex);
+  auto *sub = F->createSub("sub", B, add);
+  F->createSave("ret", sub);
+
+  LoweredInfoMap loweredMap;
+  CompilationContext cctx{&bindings, &loweredMap};
+  cctx.precisionConfig.quantMode = QuantizationMode::Profile;
+
+  bindings.allocate(A);
+  bindings.allocate(Ex);
+  EE.compile(F, cctx);
+
+  auto &table = EE.getCompiledFunction().getRuntimeBundle().getSymbolTable();
+
+  std::vector<glow::runtime::RuntimeSymbolInfo> tableContainer;
+  // Only check placeholders.
+  for (auto v : table) {
+    if (v.second.symbolCategory == glow::runtime::SymbolCategory::Placeholder) {
+      tableContainer.push_back(v.second);
+    }
+  }
+  // Sort the placeholders by offset.
+  sort(tableContainer.begin(), tableContainer.end(),
+       [](const glow::runtime::RuntimeSymbolInfo &a,
+          const glow::runtime::RuntimeSymbolInfo &b) {
+         return (a.offset < b.offset);
+       });
+
+  // Define the order of placeholders.
+  auto order = [](glow::runtime::RuntimeSymbolInfo i) -> PlaceholderType {
+    if (i.input) {
+      if (!i.output) {
+        // input only
+        return PlaceholderType::InputPlaceholder;
+      } else {
+        // input & output
+        return PlaceholderType::InputOutputPlaceholder;
+      }
+    } else {
+      if (i.output) {
+        // output only
+        return PlaceholderType::OutputPlaceholder;
+      } else {
+        // neither
+        return PlaceholderType::NonePlaceholder;
+      }
+    }
+  };
+  // The order function of placeholders should be increasing.
+  PlaceholderType prev = PlaceholderType::InputPlaceholder;
+  bool flag = true;
+  for (auto v : tableContainer) {
+    PlaceholderType tmp = order(v);
+    if (tmp > prev) {
+      prev = tmp;
+    } else if (tmp < prev) {
+      flag = false;
+      break;
+    }
+  }
+
+  EXPECT_EQ(flag, true);
+}
+
 TEST_P(BackendTest, simpleInference) {
   Tensor inputs(ElemKind::FloatTy, {1, 32, 32, 3});
-  PlaceholderBindings ctx;
+  PlaceholderBindings bindings;
 
   auto &mod = EE_.getModule();
   Function *F = mod.createFunction("main");
@@ -175,30 +245,30 @@ TEST_P(BackendTest, simpleInference) {
 
   auto *ex = mod.createPlaceholder(ElemKind::Int64ITy, {1, 1}, "exp", false);
 
-  auto *CV0 = F->createConv(ctx, "conv1", input, 16, 5, 1, 2, 1);
+  auto *CV0 = F->createConv(bindings, "conv1", input, 16, 5, 1, 2, 1);
   auto *RL0 = F->createRELU("relu1", CV0);
   auto *MP0 = F->createMaxPool("pool1", RL0, 2, 2, 0);
 
-  auto *CV1 = F->createConv(ctx, "conv2", MP0, 20, 5, 1, 2, 1);
+  auto *CV1 = F->createConv(bindings, "conv2", MP0, 20, 5, 1, 2, 1);
   auto *RL1 = F->createRELU("relu2", CV1);
   auto *MP1 = F->createMaxPool("pool2", RL1, 2, 2, 0);
 
-  auto *CV2 = F->createConv(ctx, "conv3", MP1, 20, 5, 1, 2, 1);
+  auto *CV2 = F->createConv(bindings, "conv3", MP1, 20, 5, 1, 2, 1);
   auto *RL2 = F->createRELU("relu3", CV2);
   auto *MP2 = F->createMaxPool("pool3", RL2, 2, 2, 0);
 
-  auto *FCL1 = F->createFullyConnected(ctx, "fc", MP2, 10);
+  auto *FCL1 = F->createFullyConnected(bindings, "fc", MP2, 10);
   auto *RL3 = F->createRELU("relu4", FCL1);
   auto *SM = F->createSoftMax("sm", RL3, ex);
   auto *S = F->createSave("ret", SM);
 
-  ctx.allocate(input);
-  ctx.allocate(ex);
-  ctx.allocate(S->getPlaceholder());
+  bindings.allocate(input);
+  bindings.allocate(ex);
+  bindings.allocate(S->getPlaceholder());
   EE_.compile(CompilationMode::Infer, F);
 
-  updateInputPlaceholders(ctx, {input}, {&inputs});
-  EE_.run(ctx);
+  updateInputPlaceholders(bindings, {input}, {&inputs});
+  EE_.run(bindings);
 }
 
 /// Test that the DebugPrint instruction works correctly for the backend. Note
@@ -231,18 +301,18 @@ TEST_P(BackendTest, debugPrint) {
 /// collectConstants is false.
 TEST_P(BackendTest, CompileWithoutConstants) {
   Module mod;
-  PlaceholderBindings ctx;
+  PlaceholderBindings bindings;
   Function *F = mod.createFunction("main");
   auto *X = mod.createPlaceholder(ElemKind::FloatTy, {3}, "X", false);
-  auto *XTensor = ctx.allocate(X);
+  auto *XTensor = bindings.allocate(X);
   XTensor->getHandle() = {1., 2., 3.};
   auto *pow = F->createPow("Pow1", X, 2.0);
   auto *save = F->createSave("save", pow);
-  ctx.allocate(save->getPlaceholder());
+  bindings.allocate(save->getPlaceholder());
   std::unique_ptr<Backend> backend(createBackend(GetParam()));
   BackendOptions opts;
   opts.collectConstants = false;
-  auto function = backend->compile(F, opts);
+  auto function = EXIT_ON_ERR(backend->compile(F, opts));
 }
 
 /// Test that the runtimeBundle includes only symbols from its function and not
@@ -265,8 +335,8 @@ TEST_P(BackendTest, BundleFunctionSymbolsOnly) {
   bindings2.allocate(save2->getPlaceholder());
 
   std::unique_ptr<Backend> backend(createBackend(GetParam()));
-  auto function = backend->compile(F);
-  auto function2 = backend->compile(F2);
+  auto function = EXIT_ON_ERR(backend->compile(F));
+  auto function2 = EXIT_ON_ERR(backend->compile(F2));
   auto table1 = function->getRuntimeBundle().getSymbolTable();
   auto table2 = function2->getRuntimeBundle().getSymbolTable();
   /// Make sure no symbol in table1 is in table2.
@@ -293,8 +363,8 @@ TEST_P(BackendTest, BundleSharedConstant) {
   bindings2.allocate(save2->getPlaceholder());
 
   std::unique_ptr<Backend> backend(createBackend(GetParam()));
-  auto function = backend->compile(F);
-  auto function2 = backend->compile(F2);
+  auto function = EXIT_ON_ERR(backend->compile(F));
+  auto function2 = EXIT_ON_ERR(backend->compile(F2));
   auto table1 = function->getRuntimeBundle().getSymbolTable();
   auto table2 = function2->getRuntimeBundle().getSymbolTable();
   /// Make sure X is in both tables.
@@ -318,7 +388,8 @@ TEST_P(BackendTest, compileVectorOfFunctions) {
   }
   std::unique_ptr<Backend> backend(createBackend(GetParam()));
   BackendOptions opts;
-  auto function = backend->compileFunctions(functions, opts);
+  auto functionOrErr = backend->compileFunctions(functions, opts);
+  ASSERT_TRUE((bool)functionOrErr);
 }
 
 /// This test checks that we can compile a function without depending on the
@@ -326,15 +397,15 @@ TEST_P(BackendTest, compileVectorOfFunctions) {
 /// Later we execute the code and check that things work.
 TEST_P(BackendTest, decoupleCodegenFromGraph) {
   Module mod;
-  PlaceholderBindings ctx;
+  PlaceholderBindings bindings;
 
   Function *F = mod.createFunction("main");
   auto *X = mod.createPlaceholder(ElemKind::FloatTy, {3}, "X", false);
-  auto *XTensor = ctx.allocate(X);
+  auto *XTensor = bindings.allocate(X);
   XTensor->getHandle() = {1., 2., 3.};
   auto *pow = F->createPow("Pow1", X, 2.0);
   auto *save = F->createSave("save", pow);
-  auto *saveTensor = ctx.allocate(save->getPlaceholder());
+  auto *saveTensor = bindings.allocate(save->getPlaceholder());
   EE_.compile(CompilationMode::Infer, F);
 
   // Collect constants to fill out the RuntimeBundle.
@@ -346,7 +417,7 @@ TEST_P(BackendTest, decoupleCodegenFromGraph) {
 
   // We can run the compiled code without having the graph representation
   // around.
-  EE_.run(ctx);
+  EE_.run(bindings);
 
   auto HX = saveTensor->getHandle();
   EXPECT_NEAR(HX.at({0}), 1, 1E-5);
@@ -361,12 +432,12 @@ TEST_P(BackendTest, simplePlaceholderValue) {
   auto &mod = EE_.getModule();
   Function *F = mod.createFunction("main");
   auto *input = mod.createPlaceholder(ElemKind::FloatTy, {4}, "input", false);
-  PlaceholderBindings ctx({input}, {&data});
+  PlaceholderBindings bindings({input}, {&data});
   SaveNode *S = F->createSave("ret", input);
-  auto *STensor = ctx.allocate(S->getPlaceholder());
+  auto *STensor = bindings.allocate(S->getPlaceholder());
 
   EE_.compile(CompilationMode::Infer, F);
-  EE_.run(ctx);
+  EE_.run(bindings);
   EXPECT_TRUE(STensor->isEqual(data));
 }
 
@@ -487,13 +558,25 @@ TEST(PlaceholderBindings, basicPlaceholderBindingsTest) {
 }
 
 INSTANTIATE_TEST_CASE_P(Interpreter, BackendTest,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(JIT, BackendTest, ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(JIT, BackendTest, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU
 
 #ifdef GLOW_WITH_OPENCL
-INSTANTIATE_TEST_CASE_P(OpenCL, BackendTest,
-                        ::testing::Values(BackendKind::OpenCL));
+INSTANTIATE_TEST_CASE_P(OpenCL, BackendTest, ::testing::Values("OpenCL"));
 #endif // GLOW_WITH_OPENCL
+
+/// Check if the dump function works for Type.
+TEST(BackendTest, dumpType) {
+  Module mod;
+  TypeRef tyA = mod.uniqueType(ElemKind::FloatTy, {1, 32, 32, 3});
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  tyA->dump(os);
+  std::string mesA = tyA->toString();
+  std::string expectA = "float<1 x 32 x 32 x 3>";
+  EXPECT_EQ(mesA, expectA);
+  EXPECT_EQ(mesA, os.str());
+}

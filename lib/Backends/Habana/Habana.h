@@ -16,8 +16,8 @@
 #ifndef GLOW_BACKENDS_HABANA_HABANA_H
 #define GLOW_BACKENDS_HABANA_HABANA_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/CompiledFunction.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/CompiledFunction.h"
 #include "glow/IR/Instrs.h"
 #include "glow/Quantization/Base/Base.h"
 
@@ -27,6 +27,30 @@
 #include <mutex>
 #include <queue>
 #include <string>
+
+/// Given a synStatus \p status, evaluates to llvm::Error::success() if status
+/// is synSuccess and evaluates to an llvm::Error otherwise.
+#define chk_make_err(status)                                                   \
+  status == synSuccess                                                         \
+      ? llvm::Error::success()                                                 \
+      : MAKE_ERR(                                                              \
+            strFormat("Expected synStatus be synSuccess (%d), instead got %d", \
+                      synSuccess, status))
+
+/// Given a synStatus \p status, returns an llvm::Error::success() if status is
+/// synSuccess and returns an llvm::Error otherwise.
+#define chk(status)                                                            \
+  do {                                                                         \
+    auto res = (status);                                                       \
+    if (res != synSuccess) {                                                   \
+      return chk_make_err(res);                                                \
+    }                                                                          \
+  } while (0)
+
+/// Given a synStatus \p status, checks that status == synSuccess and kills the
+/// the program if not.
+#define chk_kill(status)                                                       \
+  CHECK_EQ((status), synSuccess) << "Expected synStatus be synSuccess"
 
 namespace glow {
 
@@ -47,7 +71,8 @@ public:
   HabanaIOBuffer &operator=(HabanaIOBuffer &&src) = delete;
 
   /// Get a pointer to the buffer at which to read/store Placeholder \p p.
-  uint8_t *get(const Placeholder *p) const;
+  /// \returns a GlowErr if an error occurred.
+  llvm::Expected<uint8_t *> get(const Placeholder *p) const;
 
 private:
   /// The device that this buffer is located on.
@@ -99,16 +124,16 @@ private:
   /// construction. This is the effective size of one HabanaIOBuffer in this
   /// pool.
   size_t perBufferSize_;
-  /// The combined size of all HabanaIOBuffers in this pool (i.e. size_ *
-  /// numBuffers_).
+  /// The combined size of all HabanaIOBuffers in this pool (i.e. perBufferSize_
+  /// * numBuffers_).
   size_t allBuffersSize_;
   /// Buffer that backs all of the HOmaIOBuffers in this pool. The first buffer
-  /// starts at buffer_, the second at buffer_ + size_, etc. The last *ends* at
-  /// buffer_ + totalSize_.
+  /// starts at buffer_, the second at buffer_ + perBufferSize_, etc. The last
+  /// *ends* at buffer_ + allBuffersSize_.
   uint8_t *buffer_;
   /// The number of buffers in the pool.
   unsigned numBuffers_{kDefaultNumBuffers};
-  static constexpr unsigned kDefaultNumBuffers{3};
+  static constexpr unsigned kDefaultNumBuffers{10};
 
   /// Queue of HabanaIOBuffers and a mutex and condition variable for
   /// synchronized access.
@@ -155,10 +180,41 @@ private:
   std::vector<EnqueueTensorInfo> outputInfo_;
 };
 
+class HabanaBackend final : public Backend {
+public:
+  /// Constructor.
+  HabanaBackend() = default;
+
+  /// @name Backend methods.
+  /// This is the implementation of the Backend interface.
+  ///@{
+  ~HabanaBackend() override = default;
+
+  std::string getBackendName() const override { return getName(); }
+  static std::string getName() { return "Habana"; }
+
+  llvm::Expected<std::unique_ptr<CompiledFunction>>
+  compile(Function *F, const BackendOptions &opts) const override;
+
+  bool isOpSupported(const NodeInfo &NI) const override;
+
+  bool shouldLower(const Node *N) const override;
+
+  bool transformPostLowering(Function *F,
+                             CompilationContext &cctx) const override;
+
+  bool shouldShareBuffers() const override { return false; }
+
+  bool supportsPartialTensors() const override { return true; }
+  /// @}
+
+  static bool isVersionBiggerEqualTo(std::string versionToCompare);
+};
+
 class HabanaBindings : public DeviceBindings {
 public:
   HabanaBindings(uint32_t deviceId, uint64_t topologyId)
-      : DeviceBindings(BackendKind::Habana), deviceId_(deviceId),
+      : DeviceBindings(HabanaBackend::getName()), deviceId_(deviceId),
         topologyId_(topologyId) {}
 
   virtual ~HabanaBindings() {}
@@ -193,8 +249,7 @@ class HabanaFunction final : public CompiledFunction {
 public:
   /// Constructor.
   HabanaFunction(const runtime::RuntimeBundle &bundle,
-                 const std::string &recipeName, PlaceholderList &&inputs,
-                 PlaceholderList &&outputs);
+                 const std::string &recipeName, Function *F);
 
   /// @name CompiledFunction interface
   ///@{
@@ -202,64 +257,24 @@ public:
 
   const std::string &getRecipeName() const { return recipeName_; }
 
-  void execute(ExecutionContext *context) override;
-
-  /// Allocates on device buffer and copies Constant weights to device.
-  void setupRuns() override;
-
-  /// Per run setup, copies Inputs from \p ctx to on device memory.
-  void beforeRun(const PlaceholderBindings &ctx) override;
-
-  /// Copies outputs from device to tensors in \p ctx.
-  void afterRun(const PlaceholderBindings &ctx) override;
-
-  /// Final cleanup.
-  void tearDownRuns() override;
+  llvm::Error execute(ExecutionContext *context) override;
   ///@}
 
-  /// \returns the Kind of Backend used to compile this function.
-  BackendKind getCompileBackendKind() const override {
-    return BackendKind::Habana;
-  }
+  /// \returns the backend used to compile this function.
+  std::string getCompileBackendName() const override { return "Habana"; }
 
   const PlaceholderList &getInputs() const { return inputs_; }
 
   const PlaceholderList &getOutputs() const { return outputs_; }
 
 private:
-  Function *F_;
+  /// Build the list of input and output placeholders.
+  void findIOPlaceholders(Function *F);
+
   std::string recipeName_;
-  const PlaceholderBindings *ctx_;
   PlaceholderList inputs_;
   PlaceholderList outputs_;
-};
-
-class HabanaBackend final : public Backend {
-public:
-  /// Constructor.
-  HabanaBackend() = default;
-
-  /// @name Backend methods.
-  /// This is the implementation of the Backend interface.
-  ///@{
-  ~HabanaBackend() override = default;
-
-  BackendKind getBackendKind() const override { return BackendKind::Habana; }
-
-  std::string getBackendName() const override { return "Habana"; }
-
-  std::unique_ptr<CompiledFunction>
-  compile(Function *F, const BackendOptions &opts) const override;
-
-  bool isOpSupported(const NodeInfo &NI) const override;
-
-  bool shouldLower(const Node *N) const override;
-
-  bool transformPostLowering(Function *F,
-                             const CompilationContext &cctx) const override;
-
-  bool shouldShareBuffers() const override { return false; }
-  /// @}
+  std::unordered_set<const Placeholder *> partialInputs_;
 };
 
 } // namespace glow

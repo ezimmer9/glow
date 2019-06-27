@@ -23,6 +23,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 
+#include <glog/logging.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -33,6 +35,11 @@ class raw_ostream;
 }
 
 namespace glow {
+
+// UINT8_MIN is not defined in standard headers.
+// Define it here for using these definitions consistently.
+#define UINT8_MIN 0
+
 struct Type;
 
 using TypeRef = const Type *;
@@ -261,6 +268,7 @@ enum class ElemKind : unsigned char {
   FloatTy,       // 32-bit float type (float)
   Float16Ty,     // 16-bit float type (half, fp16)
   Int8QTy,       // 8-bit quantized type (int8_t)
+  UInt8QTy,      // unsigned 8-bit quantized type (uint8_t)
   Int16QTy,      // 16-bit quantized type (int16_t)
   Int32QTy,      // 32-bit quantized type (int32_t)
   Int32ITy,      // 32-bit index type (int32_t)
@@ -271,8 +279,9 @@ enum class ElemKind : unsigned char {
 
 /// \returns whether \p e is a quantized ElemKind.
 inline bool isQuantizedElemKind(ElemKind e) {
-  return e == ElemKind::Int8QTy || e == ElemKind::Int16QTy ||
-         e == ElemKind::Int32QTy || e == ElemKind::UInt8FusedQTy;
+  return e == ElemKind::Int8QTy || e == ElemKind::UInt8QTy ||
+         e == ElemKind::Int16QTy || e == ElemKind::Int32QTy ||
+         e == ElemKind::UInt8FusedQTy;
 }
 
 /// A class that represents a type of a tensor.
@@ -343,18 +352,26 @@ struct Type final {
 
     int64_t low = 0, high = 0;
     switch (elementType_) {
-    case ElemKind::Int32QTy:
+    case ElemKind::Int32QTy: {
       low = INT32_MIN;
       high = INT32_MAX;
       break;
-    case ElemKind::Int16QTy:
+    }
+    case ElemKind::Int16QTy: {
       low = INT16_MIN;
       high = INT16_MAX;
       break;
-    case ElemKind::Int8QTy:
+    }
+    case ElemKind::Int8QTy: {
       low = INT8_MIN;
       high = INT8_MAX;
       break;
+    }
+    case ElemKind::UInt8QTy: {
+      low = UINT8_MIN;
+      high = UINT8_MAX;
+      break;
+    }
     default:;
     }
 
@@ -388,6 +405,15 @@ struct Type final {
     }
 
     return true;
+  }
+
+  /// \returns a hash value for this Type. Hashes for Ty1 and Ty2 are equal if
+  /// Ty1.isEqual(Ty2).
+  llvm::hash_code equals_hash() const {
+    return llvm::hash_combine(
+        elementType_, dims(),
+        // hashing floats is tricky, fall back to std::hash
+        std::hash<float>{}(scale_), offset_);
   }
 
   ElemKind getElementType() const { return elementType_; }
@@ -433,6 +459,8 @@ struct Type final {
       return std::is_same<ElemTy, float16_t>::value;
     case ElemKind::Int8QTy:
       return std::is_same<ElemTy, int8_t>::value;
+    case ElemKind::UInt8QTy:
+      return std::is_same<ElemTy, uint8_t>::value;
     case ElemKind::Int16QTy:
       return std::is_same<ElemTy, int16_t>::value;
     case ElemKind::Int32QTy:
@@ -446,7 +474,7 @@ struct Type final {
     case ElemKind::BoolTy:
       return std::is_same<ElemTy, bool>::value;
     }
-    GLOW_UNREACHABLE("Invalid type.");
+    LOG(FATAL) << "Invalid type: " << getElementName(Ty).str();
   }
 
   /// \returns true if the type of this Tensor is one of the quantized types.
@@ -474,6 +502,8 @@ struct Type final {
       return sizeof(float16_t);
     case ElemKind::Int8QTy:
       return sizeof(int8_t);
+    case ElemKind::UInt8QTy:
+      return sizeof(uint8_t);
     case ElemKind::Int16QTy:
       return sizeof(int16_t);
     case ElemKind::Int32QTy:
@@ -487,7 +517,7 @@ struct Type final {
     case ElemKind::BoolTy:
       return sizeof(bool);
     }
-    GLOW_UNREACHABLE("Invalid type.");
+    LOG(FATAL) << "Invalid type: " << getElementName(Ty).str();
   }
 
   /// \return the textual name of the element.
@@ -498,11 +528,20 @@ struct Type final {
   /// \return the textual name of the element \p Ty.
   static llvm::StringRef getElementName(ElemKind Ty) {
     static const char *names[] = {
-        "float",   "float16", "i8",       "i16",  "i32",
-        "index32", "index64", "ui8fused", "bool",
+        "float", "float16", "i8",      "ui8",      "i16",
+        "i32",   "index32", "index64", "ui8fused", "bool",
     };
     return names[(int)Ty];
   }
+
+  /// Dump a textual representation of the Type into provided output stream.
+  void dump(llvm::raw_ostream &out) const;
+
+  /// Dump a textual representation of the Type into default output stream.
+  void dump() const;
+
+  /// Dump a textual representation of the Type to std::string.
+  std::string toString() const;
 
 private:
   /// Setup the internals of type that store the dimensions. This method is

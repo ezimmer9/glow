@@ -31,14 +31,12 @@ using llvm::cast;
 using llvm::isa;
 
 void GraphGradMapper::addGradient(NodeValue activation, NodeValue grad) {
-  if (map_.count(activation)) {
-    auto curr = map_[activation];
+  auto p = map_.insert({activation, grad});
+  if (!p.second) {
+    auto curr = p.first->second;
     auto *sum = F_->createAdd("updateGrad", curr, grad);
-    map_[activation] = sum;
-    return;
+    p.first->second = sum;
   }
-
-  map_[activation] = grad;
 }
 
 bool GraphGradMapper::hasGradient(NodeValue activation) {
@@ -229,6 +227,91 @@ Function *glow::differentiate(Function *F, const TrainingConfig &conf,
 
       toAppend.push_back(BN->getGrad(map));
 
+      continue;
+    }
+
+    if (N->getKind() == Kind::MatMulNodeKind) {
+      MatMulNode *MMN = cast<MatMulNode>(N);
+      // Get gradient.
+      NodeValue OutputG = map.getGradient(MMN->getResult());
+
+      // Get LHS/RHS inputs and their transpose presentations.
+      NodeValue InputLHS = MMN->getLHS();
+      NodeValue InputRHS = MMN->getRHS();
+      auto *LT = G->createTranspose("lhs.T", InputLHS, {1, 0});
+      auto *RT = G->createTranspose("rhs.T", InputRHS, {1, 0});
+
+      // Grad for LHS = outputG x transpose(RHS).
+      auto *GradLHS =
+          new MatMulNode(MMN->getInputName(0), InputLHS.getType(), OutputG, RT);
+      // Grad for RHS = transpose(LHS) x outputG.
+      auto *GradRHS =
+          new MatMulNode(MMN->getInputName(1), InputRHS.getType(), LT, OutputG);
+
+      toAppend.push_back(GradLHS);
+      map.addGradient(InputLHS, GradLHS);
+      toAppend.push_back(GradRHS);
+      map.addGradient(InputRHS, GradRHS);
+      continue;
+    }
+
+    if (N->getKind() == Kind::BatchedReduceAddNodeKind) {
+      BatchedReduceAddNode *BRA = cast<BatchedReduceAddNode>(N);
+      // Get gradient.
+      NodeValue OutputG = map.getGradient(BRA->getResult());
+      // Get input value.
+      NodeValue Input = BRA->getBatch();
+
+      // Gradient for BatchedReduceAddNode is TileNode,
+      // repeating OutputG batch times.
+      auto Axis = BRA->getAxis();
+      // Copy input dimensions first.
+      std::vector<size_t> Dims{Input.dims()};
+      // Then set to 1 dimension size on axis.
+      Dims[Axis] = 1;
+      auto *RSN = G->createReshape("reshape.grad", OutputG, Dims);
+      auto *TN = new TileNode("tile.grad", Input.getType(), RSN->getResult(),
+                              Input.dims()[Axis], Axis);
+
+      toAppend.push_back(TN);
+      map.addGradient(Input, TN);
+      continue;
+    }
+
+    if (N->getKind() == Kind::GatherNodeKind) {
+      GatherNode *GN = cast<GatherNode>(N);
+      // Get gradient.
+      NodeValue Result = GN->getResult();
+      NodeValue OutputG = map.getGradient(Result);
+      // Get Data & Indices.
+      NodeValue Data = GN->getData();
+      NodeValue Indices = GN->getIndices();
+
+      // Reshape indices into a one-dimensional Tensor (Vector).
+      std::vector<size_t> IndicesDims{Indices.getType()->size()};
+      auto *RI = G->createReshape("reshape.indices.grad", Indices, IndicesDims);
+
+      // Reshape Gradient into N-k dimension, where k is Index dimensions,
+      // except the case when Indices is one-dimensional.
+      ReshapeNode *RG = nullptr;
+      auto K = Indices.dims().size();
+      if (K != 1) {
+        const auto &OrgDims = OutputG.dims();
+        std::vector<size_t> GDims{OrgDims.begin() + K - 1, OrgDims.end()};
+        for (size_t k = 0; k < K - 1; ++k) {
+          GDims[0] *= OrgDims[k];
+        }
+        RG = G->createReshape("reshape.output.grad", OutputG, GDims);
+      }
+      // Reshaped Indices Vector maps Reshaped Gradient Tensors
+      // to the correspondent Data Tensors, where Vector value
+      // points to Data Tensor.
+      auto *SN = G->createSplat("splat.grad", Data.getType(), 0);
+      auto *SA = new ScatterAssignNode("scatter.assign.grad", SN->getResult(),
+                                       RI->getResult(),
+                                       RG ? RG->getResult() : OutputG);
+      toAppend.push_back(SA);
+      map.addGradient(Data, SA);
       continue;
     }
 

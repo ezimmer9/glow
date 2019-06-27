@@ -19,6 +19,8 @@
 
 #include "glow/Importer/ONNXIFIModelLoader.h"
 
+#include <glog/logging.h>
+
 /// Allow defining names for onnxifi implementation.
 #ifndef GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER
 #define GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(name) name
@@ -59,6 +61,11 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendIDs)(
 #else
   constexpr bool withCPU = false;
 #endif
+#ifdef GLOW_WITH_HABANA
+  constexpr bool withHabana = true;
+#else
+  constexpr bool withHabana = false;
+#endif
 
   // Only return quantization backend if GLOW_DUMP_PROFILE.
   if (getenv("GLOW_DUMP_PROFILE")) {
@@ -70,17 +77,17 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendIDs)(
       return ONNXIFI_STATUS_FALLBACK;
     }
 
-    auto *quantizationBackendOnnx =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ true, /*forQuantization*/ true);
-    auto *quantizationBackendC2 =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ false, /*forQuantization*/ true);
+    auto *quantizationBackendOnnx = manager.createBackend(
+        "Interpreter", /*useOnnx*/ true, /*forQuantization*/ true);
+    auto *quantizationBackendC2 = manager.createBackend(
+        "Interpreter", /*useOnnx*/ false, /*forQuantization*/ true);
 
     backendIDs[0] = quantizationBackendOnnx;
     backendIDs[1] = quantizationBackendC2;
-  } else if (withCPU) {
+  } else if (withCPU || withHabana) {
     *numBackends = 4;
+
+    auto backendName = withHabana ? "Habana" : "CPU";
 
     // In case backendIDs is nullptr or does not have enough capacity just
     // return the total number of supported backends.
@@ -88,16 +95,14 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendIDs)(
       return ONNXIFI_STATUS_FALLBACK;
     }
 
-    auto *cpuBackendOnnx = manager.createBackendId(glow::BackendKind::CPU,
-                                                   /*useOnnx*/ true);
+    auto *cpuBackendOnnx = manager.createBackend(backendName,
+                                                 /*useOnnx*/ true);
     auto *interpreterBackendOnnx =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ true);
-    auto *cpuBackendC2 = manager.createBackendId(glow::BackendKind::CPU,
-                                                 /*useOnnx*/ false);
+        manager.createBackend("Interpreter", /*useOnnx*/ true);
+    auto *cpuBackendC2 = manager.createBackend(backendName,
+                                               /*useOnnx*/ false);
     auto *interpreterBackendC2 =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ false);
+        manager.createBackend("Interpreter", /*useOnnx*/ false);
 
     backendIDs[0] = cpuBackendOnnx;
     backendIDs[1] = interpreterBackendOnnx;
@@ -114,11 +119,9 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendIDs)(
     }
 
     auto *interpreterBackendOnnx =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ true);
+        manager.createBackend("Interpreter", /*useOnnx*/ true);
     auto *interpreterBackendC2 =
-        manager.createBackendId(glow::BackendKind::Interpreter,
-                                /*useOnnx*/ false);
+        manager.createBackend("Interpreter", /*useOnnx*/ false);
 
     backendIDs[0] = interpreterBackendOnnx;
     backendIDs[1] = interpreterBackendC2;
@@ -135,12 +138,12 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxReleaseBackendID)(
     onnxBackendID backendID) {
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  auto *glowBackendId = static_cast<glow::onnxifi::BackendIdPtr>(backendID);
-  if (!manager.isValid(glowBackendId)) {
+  auto *glowBackend = static_cast<glow::onnxifi::BackendPtr>(backendID);
+  if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_ID;
   }
 
-  manager.release(glowBackendId);
+  manager.release(glowBackend);
 
   return ONNXIFI_STATUS_SUCCESS;
 }
@@ -185,8 +188,8 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendInfo)(
 
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  auto *glowBackendId = static_cast<glow::onnxifi::BackendIdPtr>(backendID);
-  if (!manager.isValid(glowBackendId)) {
+  auto *glowBackend = static_cast<glow::onnxifi::BackendPtr>(backendID);
+  if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_ID;
   }
 
@@ -201,8 +204,8 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendInfo)(
     return setBackendInfoString(infoValue, infoValueSize, "1.0.0");
   case ONNXIFI_BACKEND_DEVICE:
     return setBackendInfoString(infoValue, infoValueSize,
-                                glowBackendId->getUseOnnx() ? "Glow Onnx"
-                                                            : "Glow Caffe2");
+                                glowBackend->getUseOnnx() ? "Glow Onnx"
+                                                          : "Glow Caffe2");
   case ONNXIFI_BACKEND_MEMORY_TYPES:
     return setBackendInfoUInt64(infoValue, infoValueSize,
                                 ONNXIFI_MEMORY_TYPE_CPU);
@@ -232,12 +235,12 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetBackendCompatibility)(
 
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  auto *glowBackendId = static_cast<glow::onnxifi::BackendIdPtr>(backendID);
-  if (!manager.isValid(glowBackendId)) {
+  auto *glowBackend = static_cast<glow::onnxifi::BackendPtr>(backendID);
+  if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_ID;
   }
 
-  return glowBackendId->checkGraphCompatibility(onnxModel, onnxModelSize);
+  return glowBackend->checkGraphCompatibility(onnxModel, onnxModelSize);
 }
 
 /// Initialize an ONNXIFI backend.
@@ -251,12 +254,12 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxInitBackend)(
 
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  auto *glowBackendId = static_cast<glow::onnxifi::BackendIdPtr>(backendID);
-  if (!manager.isValid(glowBackendId)) {
+  auto *glowBackend = static_cast<glow::onnxifi::BackendPtr>(backendID);
+  if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_ID;
   }
 
-  *backend = manager.createBackend(glowBackendId);
+  *backend = glowBackend;
 
   return ONNXIFI_STATUS_SUCCESS;
 }
@@ -270,8 +273,6 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxReleaseBackend)(onnxBackend backend) {
   if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_BACKEND;
   }
-
-  manager.release(glowBackend);
 
   return ONNXIFI_STATUS_SUCCESS;
 }
@@ -384,16 +385,16 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxInitGraph)(
     return ONNXIFI_STATUS_INVALID_BACKEND;
   }
 
-  glow::onnxifi::OnnxifiQuantizationStep quantizationStep;
+  glow::QuantizationMode quantizationMode;
   if (getenv("GLOW_DUMP_PROFILE")) {
-    quantizationStep = glow::onnxifi::OnnxifiQuantizationStep::Profile;
+    quantizationMode = glow::QuantizationMode::Profile;
   } else if (getenv("GLOW_LOAD_PROFILE")) {
-    quantizationStep = glow::onnxifi::OnnxifiQuantizationStep::Quantize;
+    quantizationMode = glow::QuantizationMode::Quantize;
   } else {
-    quantizationStep = glow::onnxifi::OnnxifiQuantizationStep::None;
+    quantizationMode = glow::QuantizationMode::None;
   }
 
-  auto *glowGraph = manager.createGraph(glowBackend, quantizationStep);
+  auto *glowGraph = manager.createGraph(glowBackend, quantizationMode);
   auto ret = glowGraph->initGraph(onnxModel, onnxModelSize, weightsCount,
                                   weightDescriptors);
   if (ret != ONNXIFI_STATUS_SUCCESS) {
@@ -433,7 +434,7 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxSetGraphIO)(
     onnxGraph graph, uint32_t inputsCount,
     const onnxTensorDescriptorV1 *inputDescriptors, uint32_t outputsCount,
     const onnxTensorDescriptorV1 *outputDescriptors) {
-  llvm::errs() << "Use onnxSetIOAndRunGraph instead of onnxSetGraphIO\n";
+  LOG(ERROR) << "Use onnxSetIOAndRunGraph instead of onnxSetGraphIO";
   return ONNXIFI_STATUS_INTERNAL_ERROR;
 }
 
@@ -443,7 +444,7 @@ EXTERNC ONNXIFI_PUBLIC ONNXIFI_CHECK_RESULT onnxStatus ONNXIFI_ABI
 GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxRunGraph)(
     onnxGraph graph, const onnxMemoryFenceV1 *inputFence,
     onnxMemoryFenceV1 *outputFence) {
-  llvm::errs() << "Use onnxSetIOAndRunGraph instead of onnxRunGraph\n";
+  LOG(ERROR) << "Use onnxSetIOAndRunGraph instead of onnxRunGraph";
   return ONNXIFI_STATUS_INTERNAL_ERROR;
 }
 
@@ -458,7 +459,12 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxSetIOAndRunGraph)(
     onnxMemoryFenceV1 *outputFence, onnxTraceEventList *traceEvents) {
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  if (!inputDescriptors || !outputDescriptors || !outputFence) {
+  if ((inputsCount && !inputDescriptors) ||
+      (outputsCount && !outputDescriptors) || !outputFence) {
+    LOG(ERROR) << "inputsCount " << inputsCount << ", outputsCount "
+               << outputsCount << ", inputDescriptors: " << inputDescriptors
+               << ", outputDescriptors: " << outputDescriptors
+               << ", outputFence: " << outputFence;
     return ONNXIFI_STATUS_INVALID_POINTER;
   }
 
@@ -538,8 +544,8 @@ GLOW_ONNXIFI_LIBRARY_FUNCTION_WRAPPER(onnxGetExtensionFunctionAddress)(
 
   auto &manager = glow::onnxifi::GlowOnnxifiManager::get();
 
-  auto *glowBackendId = static_cast<glow::onnxifi::BackendIdPtr>(backendID);
-  if (!manager.isValid(glowBackendId)) {
+  auto *glowBackend = static_cast<glow::onnxifi::BackendPtr>(backendID);
+  if (!manager.isValid(glowBackend)) {
     return ONNXIFI_STATUS_INVALID_ID;
   }
 

@@ -21,12 +21,10 @@ target_link_libraries(RuntimeBench
                       PRIVATE
                         Backend
                         Backends
-                        CPUBackend
                         ExecutionEngine
                         Executor
-                        DeviceManager
                         HostManager
                         Graph
-                        Optimizer
+                        GraphOptimizer
                         benchmark)
 endif()

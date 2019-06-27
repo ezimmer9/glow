@@ -148,6 +148,8 @@ static void dumpGenericImpl(Handle<ElemTy> handle, llvm::raw_ostream &os,
   }
 
   os << "]\n";
+
+  os.flush();
 }
 
 template <class ElemTy>
@@ -188,6 +190,8 @@ static void dumpAsciiGenericImpl(Handle<ElemTy> handle, llvm::raw_ostream &os) {
   } else {
     llvm_unreachable("Invalid tensor size");
   }
+
+  os.flush();
 }
 
 /// This is a slow generic transpose. This method performs a single for loop
@@ -275,6 +279,8 @@ void glow::dumpAsciiImpl(const Tensor *T, llvm::raw_ostream &os) {
     return dumpAsciiGenericImpl(T->getHandle<float16_t>(), os);
   case ElemKind::Int8QTy:
     return dumpAsciiGenericImpl(T->getHandle<int8_t>(), os);
+  case ElemKind::UInt8QTy:
+    return dumpAsciiGenericImpl(T->getHandle<uint8_t>(), os);
   case ElemKind::Int16QTy:
     return dumpAsciiGenericImpl(T->getHandle<int16_t>(), os);
   case ElemKind::Int32QTy:
@@ -301,6 +307,8 @@ void glow::dumpImpl(const Tensor *T, llvm::raw_ostream &os,
     return dumpGenericImpl(T->getHandle<float16_t>(), os, maxNumElem);
   case ElemKind::Int8QTy:
     return dumpGenericImpl(T->getHandle<int8_t>(), os, maxNumElem);
+  case ElemKind::UInt8QTy:
+    return dumpGenericImpl(T->getHandle<uint8_t>(), os, maxNumElem);
   case ElemKind::Int16QTy:
     return dumpGenericImpl(T->getHandle<int16_t>(), os, maxNumElem);
   case ElemKind::Int32QTy:
@@ -321,6 +329,36 @@ void glow::dumpImpl(const Tensor *T, unsigned maxNumElem) {
 }
 
 void glow::dumpImpl(const Tensor *T) { dumpImpl(T, llvm::outs()); }
+
+// Dump functions.
+void Tensor::dump(llvm::raw_ostream &os) const { dumpImpl(this, os); }
+
+void Tensor::dump() const { dumpImpl(this, llvm::outs()); }
+
+std::string Tensor::toString() const {
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  dumpImpl(this, os);
+  return os.str();
+}
+
+void Tensor::dump(llvm::raw_ostream &os, unsigned maxNumElem) const {
+  dumpImpl(this, os, maxNumElem);
+}
+
+void Tensor::dump(unsigned maxNumElem) const {
+  dumpImpl(this, llvm::outs(), maxNumElem);
+}
+
+std::string Tensor::toString(unsigned maxNumElem) const {
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  dumpImpl(this, os, maxNumElem);
+  return os.str();
+}
+
+/// Dump a textual representation of a specific number of elements in the Tensor
+/// to std::string.
 
 void glow::genericTranspose(const Tensor *src, Tensor *dest,
                             llvm::ArrayRef<unsigned_t> shuffle) {
@@ -356,6 +394,12 @@ void glow::genericTranspose(const Tensor *src, Tensor *dest,
   case ElemKind::Int8QTy: {
     auto srcH = src->getHandle<int8_t>();
     auto destH = dest->getHandle<int8_t>();
+    transposeSelectImpl(srcH, destH, shuffle);
+    return;
+  }
+  case ElemKind::UInt8QTy: {
+    auto srcH = src->getHandle<uint8_t>();
+    auto destH = dest->getHandle<uint8_t>();
     transposeSelectImpl(srcH, destH, shuffle);
     return;
   }
@@ -421,6 +465,10 @@ void Tensor::init(InitKind init, float val, PseudoRNG &PRNG) {
     }
     case ElemKind::Int8QTy: {
       getHandle<int8_t>().clear(val);
+      break;
+    }
+    case ElemKind::UInt8QTy: {
+      getHandle<uint8_t>().clear(val);
       break;
     }
     case ElemKind::Int16QTy: {
@@ -497,3 +545,25 @@ void Tensor::convertToType(ElemKind newTy) {
   }
   *this = std::move(tmp);
 }
+
+size_t Tensor::getUnpaddedSizeInBytes() const {
+  if (unpaddedSize_) {
+    return unpaddedSize_;
+  } else {
+    return type_.getSizeInBytes();
+  }
+}
+
+namespace glow {
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Tensor &t) {
+  t.dump(os);
+  return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Tensor *t) {
+  assert(t != nullptr && "Null Pointer.");
+  t->dump(os);
+  return os;
+}
+
+} // namespace glow

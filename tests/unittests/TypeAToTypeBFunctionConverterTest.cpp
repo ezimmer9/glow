@@ -16,8 +16,9 @@
 
 #include "glow/Converter/TypeAToTypeBFunctionConverter.h"
 
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 #include "glow/ExecutionEngine/ExecutionEngine.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 
 #include "llvm/Support/Casting.h"
 
@@ -25,7 +26,7 @@
 
 using namespace glow;
 
-struct AllBackends : public ::testing::TestWithParam<BackendKind> {
+struct AllBackends : public ::testing::TestWithParam<std::string> {
 protected:
   ExecutionEngine EE_{GetParam()};
 };
@@ -532,12 +533,12 @@ TEST_P(AllBackends, OptimizeMiddleConversionsFloatToFloat16) {
 
   auto *weights = mod.createConstant(
       mod.uniqueType(ElemKind::FloatTy, {13, 10}), "weights");
-  weights->getPayload().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
+  weights->getPayloadMutable().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
   Tensor origWeights;
   origWeights.assign(&weights->getPayload());
   auto *bias =
       mod.createConstant(mod.uniqueType(ElemKind::FloatTy, {10, 20}), "bias");
-  bias->getPayload().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
+  bias->getPayloadMutable().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
   Tensor origBias;
   origBias.assign(&bias->getPayload());
 
@@ -729,12 +730,12 @@ TEST_P(AllBackends, convertPlaceholderFloatToFloat16) {
 
   auto *weights = mod.createConstant(
       mod.uniqueType(ElemKind::FloatTy, {13, 10}), "weights");
-  weights->getPayload().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
+  weights->getPayloadMutable().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
   Tensor origWeights;
   origWeights.assign(&weights->getPayload());
   auto *bias =
       mod.createConstant(mod.uniqueType(ElemKind::FloatTy, {10, 20}), "bias");
-  bias->getPayload().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
+  bias->getPayloadMutable().getHandle().randomize(-5.0, 5.0, mod.getPRNG());
 
   TypeRef FCTy = mod.uniqueType(ElemKind::FloatTy, {20, 10});
   auto *FC = F->createFullyConnected("FC", input, weights, bias, FCTy);
@@ -906,13 +907,12 @@ TEST_P(AllBackends, convertExistingConversionToNoop) {
 }
 
 INSTANTIATE_TEST_CASE_P(Interpreter, AllBackends,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(CPU, AllBackends, ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(CPU, AllBackends, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU
 
 #ifdef GLOW_WITH_OPENCL
-INSTANTIATE_TEST_CASE_P(OpenCL, AllBackends,
-                        ::testing::Values(BackendKind::OpenCL));
+INSTANTIATE_TEST_CASE_P(OpenCL, AllBackends, ::testing::Values("OpenCL"));
 #endif // GLOW_WITH_OPENCL

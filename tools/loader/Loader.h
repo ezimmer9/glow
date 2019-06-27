@@ -17,6 +17,15 @@
 #define GLOW_TOOLS_LOADER_LOADER_H
 
 #include "glow/ExecutionEngine/ExecutionEngine.h"
+#include "glow/Runtime/HostManager/HostManager.h"
+
+#include "llvm/Support/CommandLine.h"
+
+/// Timer option used to indicate if inferences should be timed -time.
+extern llvm::cl::opt<bool> timeOpt;
+/// Iterations used to indicate the number of iterations to run an inferece
+/// -iterations.
+extern llvm::cl::opt<unsigned> iterationsOpt;
 
 namespace glow {
 
@@ -28,6 +37,9 @@ bool emittingBundle();
 /// \return true if profiling the graph.
 bool profilingGraph();
 
+/// Parse/verify command line parameters.
+void parseCommandLine(int argc, char **argv);
+
 /// Driver class for loading, compiling, and running inference for ONNX and
 /// Caffe2 models.
 class Loader {
@@ -37,10 +49,16 @@ class Loader {
   std::string caffe2NetWeightFilename_;
   /// ONNX model file name.
   std::string onnxModelFilename_;
-  /// Execution engine for compiling and running.
-  ExecutionEngine EE_{};
+  /// Name of loaded function.
+  std::string functionName_;
+  /// Host Manager for running the model.
+  std::unique_ptr<glow::runtime::HostManager> hostManager_;
+  /// Backend used for saving bundle and quantization.
+  glow::Backend *backend_;
   /// Function containing the model.
   Function *F_{nullptr};
+  /// Module
+  std::unique_ptr<Module> M_;
   /// A map between quantization profiling names of NodeValues that were lowered
   /// from each other. Maps to a set of names of NodeValues and their NodeKinds
   /// that were replaced by the NodeValue (whose output name is the key) that
@@ -48,9 +66,16 @@ class Loader {
   LoweredInfoMap loweredMap_;
 
 public:
-  /// Getter for the Function.
+  /// Getter for the hostManager, this can be useful for calling int othe
+  /// HostManager directly.
+  runtime::HostManager *getHostManager() { return hostManager_.get(); }
+  /// Getter for the Function. This should not be called after compile since the
+  /// compile process is destructive on the original function.
   Function *getFunction() { return F_; }
-  /// Getter for the Module.
+  /// Getter for function name.
+  std::string getFunctionName() { return functionName_; }
+  /// Getter for the Module. This should not be called after compile since the
+  /// compile process is destructive on the original function and module.
   Module *getModule() { return F_->getParent(); }
   /// Getter for the Caffe2 network file name.
   llvm::StringRef getCaffe2NetDescFilename() { return caffe2NetDescFilename_; }
@@ -62,7 +87,10 @@ public:
   llvm::StringRef getOnnxModelFilename() { return onnxModelFilename_; }
   /// Getter for the model path.
   /// \pre (modelPathOpt.size() == 1)
-  llvm::StringRef getModelOptPath();
+  static llvm::StringRef getModelOptPath();
+  /// Getter for the model path, expected to be a directory.
+  /// \pre (modelPathOpt.size() == 1)
+  static llvm::StringRef getModelOptDir();
 
   /// Compiles the Function F_. Handles quantization, emitting bundles, and
   /// dumping debug information. \p bindings bind specific
@@ -81,9 +109,8 @@ public:
   /// include quantization profile guided information.
   void generateAndSerializeQuantizationInfos(PlaceholderBindings &bindings);
 
-  /// Create the Loader driver object, and parse/verify the command line
-  /// parameters.
-  Loader(int argc, char **argv);
+  /// Create the Loader driver object.
+  Loader();
 };
 
 } // namespace glow

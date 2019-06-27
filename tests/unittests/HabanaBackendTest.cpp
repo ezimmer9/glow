@@ -19,7 +19,7 @@
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Graph/PlaceholderBindings.h"
-#include "glow/Optimizer/Optimizer.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 
 #include "gtest/gtest.h"
 
@@ -32,8 +32,7 @@ using namespace glow;
 class HabanaBackendTest : public ::testing::Test {
 protected:
   HabanaBackendTest()
-      : EE_(BackendKind::Habana), mod_(EE_.getModule()),
-        F_(mod_.createFunction("main")) {}
+      : EE_("Habana"), mod_(EE_.getModule()), F_(mod_.createFunction("main")) {}
   ~HabanaBackendTest() = default;
 
   template <ElemKind kind, typename ElemTy> void testFCHelper();
@@ -61,7 +60,8 @@ TEST_F(HabanaBackendTest, SurroundTile) {
   SaveNode *SN = F_->createSave("save", TN);
 
   // Invoke Habana backend specific graph optimisations.
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
   EXPECT_TRUE(changed);
 
   // Invoke dead code elimination.
@@ -112,7 +112,8 @@ TEST_F(HabanaBackendTest, DoNotSurroundTile) {
   F_->createSave("save", TN);
 
   // Invoke Habana backend specific graph optimisations.
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
 
   // Graph should not change since input to Tile is already 4D.
   EXPECT_FALSE(changed);
@@ -140,7 +141,8 @@ TEST_F(HabanaBackendTest, FuseConvRelu) {
   SaveNode *SN = F_->createSave("save", RN);
 
   // Invoke Habana backend specific graph optimisations.
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
   EXPECT_TRUE(changed);
 
   // Now, the graph should look like this:
@@ -213,7 +215,8 @@ TEST_F(HabanaBackendTest, FuseConvAdd) {
   SaveNode *SN = F_->createSave("save", AN);
 
   // Invoke Habana backend specific graph optimisations.
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
   EXPECT_TRUE(changed);
 
   // Now, the graph should look like this:
@@ -303,7 +306,8 @@ TEST_F(HabanaBackendTest, FuseConvAddRelu) {
   SaveNode *SN = F_->createSave("save", RN);
 
   // Invoke Habana backend specific graph optimisations.
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
   EXPECT_TRUE(changed);
 
   // Now, the graph should look like this:
@@ -370,6 +374,21 @@ TEST_F(HabanaBackendTest, FuseConvAddRelu) {
   EXPECT_EQ(F_->getNodes().size(), 4);
 }
 
+TEST_F(HabanaBackendTest, SetDeviceMemory) {
+  uint64_t defaultMemory = (7 << 20);
+  auto configEmpty = glow::runtime::DeviceConfig("Habana");
+  auto configFull = glow::runtime::DeviceConfig("Habana");
+  configFull.setDeviceMemory(32768);
+  // With no commandline or deviceConfig, the memory should be default 7 <<20.
+  glow::runtime::HabanaDeviceManager device1(configEmpty, 1, 1);
+  llvm::Error err1 = device1.init();
+  EXPECT_EQ(defaultMemory * 1024, device1.getMaximumMemory());
+  // With only deviceConfig, the memory should be set by deviceConfig.
+  glow::runtime::HabanaDeviceManager device2(configFull, 1, 1);
+  llvm::Error err2 = device2.init();
+  EXPECT_EQ(32768, device2.getMaximumMemory());
+}
+
 TEST_F(HabanaBackendTest, ConvertFC) {
   HabanaBackend backend;
   auto *input =
@@ -378,7 +397,8 @@ TEST_F(HabanaBackendTest, ConvertFC) {
   auto *bias = mod_.createConstant(ElemKind::FloatTy, {16}, "bias");
   auto *FC = F_->createFullyConnected("fc", input, weight, bias);
   auto *save = F_->createSave("save", FC);
-  backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  backend.transformPostLowering(F_, cctx);
   ASSERT_TRUE(save);
   ASSERT_TRUE(llvm::isa<HabanaFullyConnectedNode>(save->getInput()));
 }
@@ -391,7 +411,8 @@ TEST_F(HabanaBackendTest, ConvertConv) {
   ConvolutionNode *conv = F_->createConv(ctx_, "conv", input, 3, 5, 1, 2, 1);
   SaveNode *save = F_->createSave("save", conv);
 
-  bool changed = backend.transformPostLowering(F_, CompilationContext());
+  CompilationContext cctx;
+  bool changed = backend.transformPostLowering(F_, cctx);
   EXPECT_TRUE(changed);
   ASSERT_TRUE(save);
   ASSERT_TRUE(llvm::isa<HabanaConvolutionNode>(save->getInput()));
@@ -1262,8 +1283,8 @@ TEST_F(HabanaBackendTest, Clip) {
   }
 }
 
-static void fill(Tensor *T, int val) {
-  auto H = T->getHandle();
+static void fill(Tensor &T, int val) {
+  auto H = T.getHandle();
   std::iota(H.begin(), H.end(), val);
 }
 
@@ -1271,22 +1292,22 @@ TEST_F(HabanaBackendTest, Copy) {
   auto *c = mod_.createConstant(ElemKind::FloatTy, {20}, "c");
   auto *p = mod_.createPlaceholder(ElemKind::FloatTy, {20}, "p", false);
   F_->createSave("s", c, p);
-  auto *ct = &c->getPayload();
+  auto &ct = c->getPayloadMutable();
   auto *pt = ctx_.allocate(p);
   fill(ct, 1);
 
   auto *c2 = mod_.createConstant(ElemKind::FloatTy, {20}, "c2");
   auto *p2 = mod_.createPlaceholder(ElemKind::FloatTy, {20}, "p2", false);
   F_->createSave("s2", c2, p2);
-  auto *c2t = &c2->getPayload();
+  auto &c2t = c2->getPayloadMutable();
   auto *p2t = ctx_.allocate(p2);
   fill(c2t, 21);
 
   EE_.compile(CompilationMode::Infer, F_);
   EE_.run(ctx_);
 
-  ASSERT_TRUE(ct->isEqual(*pt));
-  ASSERT_TRUE(c2t->isEqual(*p2t));
+  ASSERT_TRUE(ct.isEqual(*pt));
+  ASSERT_TRUE(c2t.isEqual(*p2t));
 }
 
 TEST_F(HabanaBackendTest, CopyPlaceholder) {
@@ -1455,7 +1476,8 @@ TEST_F(HabanaBackendTest, SingleFunctionMultiThreadMultiDevice) {
   std::vector<std::unique_ptr<DeviceManager>> deviceManagers;
 
   for (unsigned i = 0; i < maxDeviceManagers; ++i) {
-    DeviceManager *deviceManager = new glow::runtime::HabanaDeviceManager();
+    DeviceManager *deviceManager =
+        new glow::runtime::HabanaDeviceManager(runtime::DeviceConfig("Habana"));
 
     if (deviceManager->init()) {
       delete deviceManager;
@@ -1492,11 +1514,11 @@ TEST_F(HabanaBackendTest, SingleFunctionMultiThreadMultiDevice) {
 
   // Compile function.
   glow::runtime::FunctionMapTy functions;
-  auto backend = std::unique_ptr<Backend>(createBackend(BackendKind::Habana));
+  auto backend = std::unique_ptr<Backend>(createBackend("Habana"));
   CompilationContext cctx;
-  cctx.mode = CompilationMode::Infer;
-  ::glow::optimizeFunction(F_, *backend, cctx);
-  auto compiledFunction = backend->compile(F_, cctx.backendOpts);
+  cctx.compMode = CompilationMode::Infer;
+  EXIT_ON_ERR(::glow::optimizeFunction(F_, *backend, cctx));
+  auto compiledFunction = EXIT_ON_ERR(backend->compile(F_, cctx.backendOpts));
   functions.emplace(F_->getName(), compiledFunction.get());
 
   // Add the function to each device.
@@ -1589,4 +1611,189 @@ TEST_F(HabanaBackendTest, SingleFunctionMultiThreadMultiDevice) {
   for (auto &deviceManager : deviceManagers) {
     EXPECT_FALSE(errToBool(deviceManager->stop()));
   }
+}
+
+TEST_F(HabanaBackendTest, FCPerf) {
+  const int fcSize = 1000;
+  auto *data =
+      mod_.createPlaceholder(ElemKind::FloatTy, {16, fcSize}, "data", false);
+  auto *weights = mod_.createPlaceholder(ElemKind::FloatTy, {fcSize, fcSize},
+                                         "weights", false);
+  auto *bias =
+      mod_.createPlaceholder(ElemKind::FloatTy, {fcSize}, "bias", false);
+
+  auto *fc = F_->createFullyConnected("fc", data, weights, bias);
+  auto *output =
+      mod_.createPlaceholder(ElemKind::FloatTy, {16, fcSize}, "output", false);
+  F_->createSave("save", fc, output);
+
+  ctx_.allocate(data)->getHandle().clear(1);
+  ctx_.allocate(weights)->getHandle().clear(0);
+  ctx_.allocate(bias)->getHandle().clear(32);
+  ctx_.allocate(output);
+
+  glow::convertPlaceholdersToConstants(F_, ctx_, {data, output});
+
+  EE_.compile(CompilationMode::Infer, F_);
+  EE_.run(ctx_);
+  struct timespec begin;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &begin);
+  for (int i = 0; i < 10; i++)
+    EE_.run(ctx_);
+  struct timespec end;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  double elapsedSecs = (end.tv_nsec - begin.tv_nsec) / 1000000000.0 +
+                       (end.tv_sec - begin.tv_sec);
+  printf("Time: %lf\n", elapsedSecs);
+  uint64_t flops = 10 * fcSize * (uint64_t)fcSize * 16 * 2;
+  printf("Tflops: %lf\n", (flops) / elapsedSecs * 1e-12);
+}
+
+// Test performance of Gather.
+TEST_F(HabanaBackendTest, GatherPerf) {
+  // Create function.
+  auto *data = mod_.createPlaceholder(ElemKind::FloatTy, {50}, "data", false);
+  auto *indices =
+      mod_.createPlaceholder(ElemKind::Int32ITy, {3000}, "indices", false);
+
+  auto H = ctx_.allocate(data)->getHandle();
+  H.randomize(-1.0f, 1.0f, mod_.getPRNG());
+  auto H2 = ctx_.allocate(indices)->getHandle<int32_t>();
+  for (int i = 0; i < 50; i++) {
+    H2.raw(i) = rand() % 50;
+  }
+  for (int i = 50; i < 3000; i++) {
+    H2.raw(i) = 0;
+  }
+
+  // Create a gather (a single batch dimension).
+  auto *R = F_->createGather("gather", data, indices, 0);
+
+  auto *result = F_->createSave("save", R);
+  ctx_.allocate(result->getPlaceholder());
+
+  EE_.compile(CompilationMode::Infer, F_);
+  EE_.run(ctx_);
+  struct timespec begin;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &begin);
+  for (int i = 0; i < 1000; i++)
+    EE_.run(ctx_);
+  struct timespec end;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  double elapsedSecs = (end.tv_nsec - begin.tv_nsec) / 1000000000.0 +
+                       (end.tv_sec - begin.tv_sec);
+  printf("Time: %lf\n", elapsedSecs);
+  printf("GBps: %lf\n", 10 * 3000 * 4.0 / elapsedSecs / 1000 / 1000 / 1000);
+}
+
+TEST_F(HabanaBackendTest, BatchedGather) {
+  /*
+   DATA  = [
+    [1.0, 1.2, 2.4, 4.5],
+    [2.3, 3.4, 3.6, 2.3],
+    [4.5, 5.7, 1.2, 4.5],
+   ]
+
+   INDICES = [0, 2],
+
+   OUTPUT = [
+    [1.0, 2.4],
+    [2.3, 3.6],
+    [4.5, 1.2],
+   ]
+   */
+  auto *data = mod_.createPlaceholder(ElemKind::FloatTy, {3, 4}, "data", false);
+  auto *indices =
+      mod_.createPlaceholder(ElemKind::Int32ITy, {2}, "indices", false);
+
+  ctx_.allocate(data)->getHandle() = {
+      1.0f, 1.2f, 2.4f, 4.5f, 2.3f, 3.4f, 3.6f, 2.3f, 4.5f, 5.7f, 1.2f, 4.5f,
+  };
+  ctx_.allocate(indices)->getHandle<int32_t>() = {
+      0,
+      2,
+  };
+
+  // Create a batched gather (a single batch dimension).
+  auto *R = F_->createGather("gather", data, indices, 1);
+
+  auto *result = F_->createSave("save", R);
+  ctx_.allocate(result->getPlaceholder());
+
+  EE_.compile(CompilationMode::Infer, F_);
+  EE_.run(ctx_);
+
+  auto H = ctx_.get(result->getPlaceholder())->getHandle();
+  EXPECT_FLOAT_EQ(H.at({0, 0}), 1.0);
+  EXPECT_FLOAT_EQ(H.at({0, 1}), 2.4);
+  EXPECT_FLOAT_EQ(H.at({1, 0}), 2.3);
+  EXPECT_FLOAT_EQ(H.at({1, 1}), 3.6);
+  EXPECT_FLOAT_EQ(H.at({2, 0}), 4.5);
+  EXPECT_FLOAT_EQ(H.at({2, 1}), 1.2);
+}
+
+TEST_F(HabanaBackendTest, BatchedGatherMultipleRuns) {
+  const unsigned M = 1000;
+  const unsigned N = 1;
+
+  // Fill out the array with random data
+  std::vector<float> inputData;
+  inputData.resize(M);
+  for (unsigned int i = 0; i < M; i++) {
+    inputData[i] = float(rand() % 1000) / 100;
+  }
+
+  // ID list, to be filled up
+  unsigned idLen = 10000;
+  std::vector<int> inputIds;
+  inputIds.resize(idLen);
+
+  // Create placeholder for data
+  auto *data = mod_.createPlaceholder(ElemKind::FloatTy, {N, M}, "data", false);
+  ctx_.allocate(data)->getHandle() = inputData;
+
+  auto *indices =
+      mod_.createPlaceholder(ElemKind::Int32ITy, {idLen}, "indices", false);
+  auto indicesH = ctx_.allocate(indices)->getHandle<int32_t>();
+  indicesH = inputIds;
+
+  // create the net
+  auto *R = F_->createGather("gather", data, indices, 1);
+  auto *result = F_->createSave("save", R);
+  ctx_.allocate(result->getPlaceholder());
+
+  EE_.compile(CompilationMode::Infer, F_);
+
+  // run this multiple times
+  for (auto ntimes = 0; ntimes < 10; ntimes++) {
+    // fill up the ID list with random data
+    for (unsigned int i = 0; i < inputIds.size(); i++) {
+      inputIds[i] = rand() % M;
+    }
+    indicesH = inputIds;
+
+    EE_.run(ctx_);
+
+    auto H = ctx_.get(result->getPlaceholder())->getHandle();
+    for (unsigned i = 0; i < idLen; i++) {
+      EXPECT_FLOAT_EQ(inputData[inputIds[i]], H.at({0, i}));
+    }
+  }
+}
+
+TEST_F(HabanaBackendTest, MergeFCRelu) {
+  auto *FCi = mod_.createPlaceholder(ElemKind::FloatTy, {2, 2}, "input", false);
+  auto *FCw = mod_.createConstant(ElemKind::FloatTy, {2, 2}, "weight");
+  auto *FCb = mod_.createConstant(ElemKind::FloatTy, {2}, "bias");
+  auto *fcNode = F_->createFullyConnected("fc", FCi, FCw, FCb);
+  auto *relu = F_->createRELU("relu", fcNode);
+  F_->createSave("save", relu);
+
+  // Should have three nodes FC, Relu, save
+  ASSERT_EQ(F_->getNodes().size(), 3);
+
+  EE_.compile(CompilationMode::Infer, F_);
+
+  // Should have two nodes FC, save
+  ASSERT_EQ(F_->getNodes().size(), 2);
 }

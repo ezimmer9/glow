@@ -18,10 +18,11 @@
 
 #include "glow/Base/Tensor.h"
 #include "glow/Converter/TypeAToTypeBFunctionConverter.h"
-#include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/IR/IR.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Quantization/Quantization.h"
 #include "glow/Quantization/Serialization.h"
+#include "glow/Runtime/RuntimeTypes.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -30,6 +31,8 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <sstream>
 
 using namespace glow;
 
@@ -62,16 +65,6 @@ llvm::cl::opt<bool>
     verbose("verbose",
             llvm::cl::desc("Specify whether to run with verbose output"),
             llvm::cl::Optional, llvm::cl::cat(loaderCat));
-
-llvm::cl::opt<bool>
-    timeOpt("time",
-            llvm::cl::desc("Print timer output to stderr detailing how long it "
-                           "takes for the program to execute"),
-            llvm::cl::Optional, llvm::cl::cat(loaderCat));
-
-llvm::cl::opt<unsigned> iterationsOpt(
-    "iterations", llvm::cl::desc("Number of iterations to perform"),
-    llvm::cl::Optional, llvm::cl::init(1), llvm::cl::cat(loaderCat));
 
 llvm::cl::opt<std::string> dumpProfileFileOpt(
     "dump-profile",
@@ -132,14 +125,10 @@ llvm::cl::list<std::string> doNotLowerNodesForProfilingOpt(
     llvm::cl::value_desc("NodeNames (e.g. Convolution,FullyConnected)"),
     llvm::cl::ZeroOrMore, llvm::cl::CommaSeparated, llvm::cl::cat(loaderCat));
 
-llvm::cl::opt<BackendKind> ExecutionBackend(
-    llvm::cl::desc("Backend to use:"),
-    llvm::cl::values(clEnumValN(BackendKind::Interpreter, "interpreter",
-                                "Use interpreter"),
-                     clEnumValN(BackendKind::CPU, "cpu", "Use CPU"),
-                     clEnumValN(BackendKind::OpenCL, "opencl", "Use OpenCL"),
-                     clEnumValN(BackendKind::Habana, "habana", "Use Habana")),
-    llvm::cl::init(BackendKind::Interpreter), llvm::cl::cat(loaderCat));
+llvm::cl::opt<std::string> ExecutionBackend(
+    "backend",
+    llvm::cl::desc("Backend to use, e.g., Interpreter, CPU, OpenCL:"),
+    llvm::cl::init("Interpreter"), llvm::cl::cat(loaderCat));
 
 /// Debugging options.
 llvm::cl::OptionCategory
@@ -147,6 +136,11 @@ llvm::cl::OptionCategory
                    "These options are for debugging the "
                    "graphs by writing the IR/Graphs to "
                    "given files/stdout");
+
+llvm::cl::opt<std::string> dumpGraphDAGFileBeforeCompilationOpt(
+    "dump-graph-DAG-before-compile",
+    llvm::cl::desc("Specify the file to export the Graph in DOT format"),
+    llvm::cl::value_desc("file.dot"), llvm::cl::cat(modelExportCat));
 
 llvm::cl::opt<std::string> dumpGraphDAGFileOpt(
     "dump-graph-DAG",
@@ -179,17 +173,52 @@ llvm::cl::opt<bool> assertAllNodesQuantizedOpt(
         "whitelist node kinds that are allowed to be left unquantized."),
     llvm::cl::init(false), llvm::cl::cat(loaderCat));
 
+/// The device configs file used for Runtime.
+llvm::cl::opt<std::string> loadDeviceConfigsFileOpt(
+    "load-device-configs",
+    llvm::cl::desc("Load device configs used in Runtime"),
+    llvm::cl::value_desc("profile.yaml"), llvm::cl::Optional,
+    llvm::cl::cat(loaderCat));
+
 /// Name of the network being bundled.
 llvm::cl::opt<std::string> networkName(
     "network-name",
-    llvm::cl::desc("Name of the network being bundled. "
-                   "This name is used as both the function name "
-                   "of the entry point to the network "
-                   "and as a prefix for all the files that are generated."),
+    llvm::cl::desc("Name of the network being bundled. This name is used as a "
+                   "prefix for all the files that are generated."),
     llvm::cl::cat(loaderCat));
+
+/// Name of the main entry of the bundle.
+llvm::cl::opt<std::string>
+    mainEntryName("main-entry-name",
+                  llvm::cl::desc("Name of the main entry in the bundle. "
+                                 "This name is used as the function name "
+                                 "of the entry point to the network."),
+                  llvm::cl::cat(loaderCat));
+
+llvm::cl::opt<unsigned> numDevices("num-devices",
+                                   llvm::cl::desc("Number of Devices to use"),
+                                   llvm::cl::init(1), llvm::cl::value_desc("N"),
+                                   llvm::cl::cat(loaderCat));
 } // namespace
 
+// timeOpt and iterationsOpt are outside the namespace so they can be used by
+// the image-classifier.
+llvm::cl::opt<bool>
+    timeOpt("time",
+            llvm::cl::desc("Print timer output to stderr detailing how long it "
+                           "takes for the program to execute"),
+            llvm::cl::Optional, llvm::cl::cat(loaderCat));
+
+llvm::cl::opt<unsigned> iterationsOpt(
+    "iterations", llvm::cl::desc("Number of iterations to perform"),
+    llvm::cl::Optional, llvm::cl::init(0), llvm::cl::cat(loaderCat));
+
 llvm::StringRef Loader::getModelOptPath() {
+  assert(modelPathOpt.size() == 1 && "Model path must be a single path.");
+  return modelPathOpt[0];
+}
+
+llvm::StringRef Loader::getModelOptDir() {
   assert(modelPathOpt.size() == 1 &&
          llvm::sys::fs::is_directory(*modelPathOpt.begin()) &&
          "Model path must be a single directory.");
@@ -201,10 +230,12 @@ bool glow::emittingBundle() { return !emitBundle.empty(); }
 bool glow::profilingGraph() { return !dumpProfileFileOpt.empty(); }
 
 static bool commandLineIsInvalid() {
-  if (!dumpProfileFileOpt.empty() && !loadProfileFileOpt.empty()) {
-    llvm::errs() << "Loader: the -" << dumpProfileFileOpt.ArgStr << " and -"
-                 << loadProfileFileOpt.ArgStr
-                 << " options may not be specified together.\n";
+  if (!dumpProfileFileOpt.empty() &&
+      (!loadProfileFileOpt.empty() || convertToFP16)) {
+    llvm::errs() << "Loader: the -" << dumpProfileFileOpt.ArgStr
+                 << " option cannot be specified at the same time as either -"
+                 << loadProfileFileOpt.ArgStr << " or -" << convertToFP16.ArgStr
+                 << ".\n";
     return true;
   }
 
@@ -246,147 +277,7 @@ static bool commandLineIsInvalid() {
   return false;
 }
 
-/// Helper to get the Kind of a Node (e.g. Kinded::Kind::AddNodeKind) given its
-/// \p nodeName (e.g. Add).
-static Kinded::Kind getKindFromNodeName(llvm::StringRef nodeName) {
-#define DEF_NODE(CLASS, NAME)                                                  \
-  if (nodeName == #NAME) {                                                     \
-    return Kinded::Kind::CLASS##Kind;                                          \
-  }
-#include "glow/AutoGenNodes.def"
-  GLOW_UNREACHABLE("Unknown node name.");
-}
-
-void Loader::compile(PlaceholderBindings &bindings) {
-  // Fold low-level operators into higher-level operators.
-  // This is useful when compiling an input model where some high-level
-  // operators have been lowered (this can be for instance a side effect of
-  // model converters, like converters from Tensorflow to ONNX). In this
-  // situation, such folding can then enable more optimizations and also improve
-  // the performance backends that support natively such high-level operators.
-  ::fold(F_, glow::CompilationMode::Infer);
-
-  // Handle the request to profile the graph in preparation for quantization.
-  if (!dumpProfileFileOpt.empty()) {
-    // Perform the high-level optimizations before instrumenting the graph. This
-    // optimization phase will remove stuff like repetitive transpose operations
-    // perform CSE, etc.
-    ::optimize(F_, glow::CompilationMode::Infer);
-
-    // By default everything will be lowered for profiling. However this may
-    // cause performance issues for some models, e.g. if a model has group
-    // Convolutions which explode the size of the graph when lowered. Thus allow
-    // for disabling certain NodeKinds for profiling. This means that during
-    // quantization, these nodes should also not be lowered by the backend.
-    KindSet doNotLowerNodesForProfiling;
-    for (llvm::StringRef kindName : doNotLowerNodesForProfilingOpt) {
-      doNotLowerNodesForProfiling.insert(getKindFromNodeName(kindName));
-    }
-
-    // Lower everything, keeping track of what NodeValues were lowered to other
-    // NodeValues via the loweredMap_. This loweredMap_ is passed to
-    // generateNodeQuantizationInfos() when writing out the profile, allowing
-    // for both lowered and unlowered NodeValues to find their quantization
-    // parameters.
-    ::lower(F_, &loweredMap_, /* backend */ nullptr,
-            doNotLowerNodesForProfiling);
-
-    // Instrument the graph to capture profiles for nodes' outputs.
-    ::profileQuantization(bindings, F_);
-  }
-
-  // By default, when converting models, all nodes that can be
-  // converted are converted. However, some models may need to
-  // keep higher precision for some nodes to prevent high accuracy loss.
-  // Those nodes are gathered via the keepOriginalPrecisionForNodesOpt
-  // option and passed to the related conversion function.
-  KindSet keepOriginalPrecisionForNodes;
-  for (llvm::StringRef kindName : keepOriginalPrecisionForNodesOpt) {
-    keepOriginalPrecisionForNodes.insert(getKindFromNodeName(kindName));
-  }
-
-  // Load the quantization profile and transform the graph.
-  if (!loadProfileFileOpt.empty()) {
-    // The profiled graph was optimized before it was instrumentated. In this
-    // part of the code we repeat the same transformation in order to create
-    // the same graph structure.
-    ::optimize(F_, glow::CompilationMode::Infer);
-
-    // Lower as the backend prefers. When generating the profile everything was
-    // lowered, however all lowered and unlowered components have a profile, and
-    // so the backend can lower however it prefers and always find all of its
-    // NodeValue's quantization parameters.
-    ::lower(F_, &loweredMap_, EE_.getBackend());
-
-    quantization::QuantizationConfiguration quantConfig{
-        deserializeFromYaml(loadProfileFileOpt)};
-
-    // Quantize the graph based on the captured profile.
-    quantConfig.precision = quantizationPrecision;
-    quantConfig.schema = quantizationSchema;
-    quantConfig.enableRowwise = enableRowwiseOpt;
-    quantConfig.assertAllNodesQuantized = assertAllNodesQuantizedOpt;
-
-    quantization::quantizeFunction(F_, quantConfig, *EE_.getBackend(),
-                                   loweredMap_, keepOriginalPrecisionForNodes);
-  }
-
-  if (convertToFP16) {
-    TypeAToTypeBFunctionConverter converter(*F_, ElemKind::FloatTy,
-                                            ElemKind::Float16Ty,
-                                            &keepOriginalPrecisionForNodes);
-    converter.convert();
-    ::optimize(F_, glow::CompilationMode::Infer);
-  }
-
-  CompilationContext cctx;
-  cctx.mode = CompilationMode::Infer;
-  if (emittingBundle()) {
-    // Emit IR for the graph, compile it and save as a bundle.
-    EE_.save(F_, cctx, emitBundle, networkName);
-  } else {
-    // Emit IR for the graph and compile it.
-    EE_.compile(F_, cctx);
-  }
-
-  if (dumpGraphOpt) {
-    F_->dump();
-  }
-  if (!dumpGraphDAGFileOpt.empty()) {
-    F_->dumpDAG(dumpGraphDAGFileOpt.c_str());
-  }
-}
-
-void Loader::runInference(PlaceholderBindings &bindings, size_t batchSize) {
-  assert(!emittingBundle() &&
-         "No inference is performed in the bundle generation mode.");
-
-  llvm::Timer timer("Infer", "Infer");
-  if (timeOpt) {
-    timer.startTimer();
-  }
-  for (unsigned i = 0; i < iterationsOpt; i++) {
-    EE_.run(bindings);
-  }
-  if (timeOpt) {
-    timer.stopTimer();
-    llvm::outs() << llvm::formatv("Wall time per item (s): {0:f4}\n",
-                                  timer.getTotalTime().getWallTime() /
-                                      iterationsOpt / batchSize);
-  }
-}
-
-void Loader::generateAndSerializeQuantizationInfos(
-    PlaceholderBindings &bindings) {
-  assert(!dumpProfileFileOpt.empty() &&
-         "Filename to dump serialized profile to must not be empty.");
-  std::vector<NodeQuantizationInfo> QI =
-      quantization::generateNodeQuantizationInfos(
-          bindings, F_, loweredMap_, quantizationSchema, quantizationPrecision);
-  serializeToYaml(dumpProfileFileOpt, QI);
-}
-
-Loader::Loader(int argc, char **argv) {
+void glow::parseCommandLine(int argc, char **argv) {
   llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
   llvm::cl::ParseCommandLineOptions(
       argc, argv,
@@ -402,7 +293,176 @@ Loader::Loader(int argc, char **argv) {
                     "Please see flag's description.\n";
     std::exit(1);
   }
+}
 
+/// Helper to get the Kind of a Node (e.g. Kinded::Kind::AddNodeKind) given its
+/// \p nodeName (e.g. Add).
+static Kinded::Kind getKindFromNodeName(llvm::StringRef nodeName) {
+#define DEF_NODE(CLASS, NAME)                                                  \
+  if (nodeName == #NAME) {                                                     \
+    return Kinded::Kind::CLASS##Kind;                                          \
+  }
+#include "glow/AutoGenNodes.def"
+  LOG(FATAL) << "Unknown node name: " << nodeName.str();
+}
+
+/// Helper to get the parameters in DeviceConfig from \p str. The \p str has
+/// multiple lines, and each line with this format : "str1" : "str2".
+static llvm::StringMap<std::string> getBackendParams(std::string &str) {
+  llvm::StringMap<std::string> ret{};
+  std::string s;
+  std::istringstream f(str.c_str());
+  while (getline(f, s, '\n')) {
+    // Abstract the mapping from each line's string:
+    // ""str1" : "str2"" => ret["str1"] = "str2";
+    size_t pos1, pos2, pos3, pos4;
+    pos1 = s.find('"');
+    assert(pos1 != std::string::npos && "invalid string format");
+    pos2 = s.find('"', pos1 + 1);
+    assert(pos2 != std::string::npos && "invalid string format");
+    pos3 = s.find('"', pos2 + 1);
+    assert(pos3 != std::string::npos && "invalid string format");
+    pos4 = s.find('"', pos3 + 1);
+    assert(pos4 != std::string::npos && "invalid string format");
+    ret[s.substr(pos1 + 1, pos2 - pos1 - 1)] =
+        s.substr(pos3 + 1, pos4 - pos3 - 1);
+  }
+  return ret;
+}
+
+/// If the device config file \p loadDeviceDoncfigsFile available, load \p
+/// configs from the file. Otherwise, create \p numDevices number of devices
+/// based on \p backendName.
+static std::vector<std::unique_ptr<runtime::DeviceConfig>>
+generateDeviceConfigs(std::string &loadDeviceConfigsFile,
+                      unsigned int numDevices, llvm::StringRef backendName) {
+  std::vector<std::unique_ptr<runtime::DeviceConfig>> configs;
+  if (loadDeviceConfigsFile.empty()) {
+    // If there is no device config file, use numDevices to generate the
+    // configs.
+    for (unsigned int i = 0; i < numDevices; ++i) {
+      auto config = llvm::make_unique<runtime::DeviceConfig>(backendName);
+      configs.push_back(std::move(config));
+    }
+  } else {
+    // Get the configs from the config file.
+    std::vector<DeviceConfigHelper> lists;
+    lists = deserializeDeviceConfigFromYaml(loadDeviceConfigsFile);
+    for (unsigned int i = 0; i < lists.size(); ++i) {
+      auto backendName = lists[i].backendName_;
+      auto name = lists[i].name_;
+      auto parameters = getBackendParams(lists[i].parameters_.str);
+      auto config = llvm::make_unique<runtime::DeviceConfig>(backendName, name,
+                                                             parameters);
+      configs.push_back(std::move(config));
+    }
+  }
+  return configs;
+}
+
+void Loader::compile(PlaceholderBindings &bindings) {
+  // Dump the DAG before compilation if needed.
+  if (!dumpGraphDAGFileBeforeCompilationOpt.empty()) {
+    F_->dumpDAG(dumpGraphDAGFileBeforeCompilationOpt.c_str());
+  }
+
+  CompilationContext cctx{&bindings, &loweredMap_};
+  PrecisionConfiguration &precConfig = cctx.precisionConfig;
+
+  // Handle the request to profile the graph in preparation for quantization.
+  if (!dumpProfileFileOpt.empty()) {
+    precConfig.quantMode = QuantizationMode::Profile;
+
+    // By default everything will be lowered for profiling. However this may
+    // cause performance issues for some models, e.g. if a model has group
+    // Convolutions which explode the size of the graph when lowered. Thus allow
+    // for disabling certain NodeKinds for profiling. This means that during
+    // quantization, these nodes should also not be lowered by the backend.
+    for (llvm::StringRef kindName : doNotLowerNodesForProfilingOpt) {
+      precConfig.precisionModeKindSet.insert(getKindFromNodeName(kindName));
+    }
+  } else {
+    // By default, when converting models, all nodes that can be converted are
+    // converted. However, some models may need to keep higher precision for
+    // some nodes to prevent high accuracy loss. Those nodes are gathered via
+    // the keepOriginalPrecisionForNodesOpt option and passed to the related
+    // conversion function.
+    for (llvm::StringRef kindName : keepOriginalPrecisionForNodesOpt) {
+      precConfig.precisionModeKindSet.insert(getKindFromNodeName(kindName));
+    }
+  }
+
+  if (!loadProfileFileOpt.empty()) {
+    precConfig.quantMode = QuantizationMode::Quantize;
+    precConfig.quantConfig.precision = quantizationPrecision;
+    precConfig.quantConfig.infos = deserializeFromYaml(loadProfileFileOpt);
+    precConfig.quantConfig.schema = quantizationSchema;
+    precConfig.quantConfig.enableRowwise = enableRowwiseOpt;
+    precConfig.quantConfig.assertAllNodesQuantized = assertAllNodesQuantizedOpt;
+  }
+
+  precConfig.convertToFP16 = convertToFP16;
+
+  // Store a raw pointer to the Module, we pass the unique_ptr to HostManager
+  // but the Module is stored by Hostmanager so the pointer will remain valid.
+  auto module = M_.get();
+
+  if (emittingBundle()) {
+    // Emit IR for the graph, compile it and save as a bundle.
+    auto error = ::glow::optimizeFunction(F_, *backend_, cctx);
+    EXIT_ON_ERR(std::move(error));
+    backend_->save(F_, emitBundle, networkName,
+                   mainEntryName.empty() ? networkName : mainEntryName);
+  } else {
+    // Emit IR for the graph and compile it.
+    auto error = hostManager_->addNetwork(std::move(M_), cctx);
+    EXIT_ON_ERR(std::move(error));
+  }
+  if (dumpGraphOpt) {
+    for (auto function : module->getFunctions()) {
+      function->dump();
+    }
+  }
+  if (!dumpGraphDAGFileOpt.empty()) {
+    for (auto function : module->getFunctions()) {
+      std::string filename =
+          function->getName().str() + "_" + dumpGraphDAGFileOpt;
+      function->dumpDAG(filename.c_str());
+    }
+  }
+}
+
+void Loader::runInference(PlaceholderBindings &bindings, size_t batchSize) {
+  assert(!emittingBundle() &&
+         "No inference is performed in the bundle generation mode.");
+  unsigned iterations = iterationsOpt == 0 ? 1 : iterationsOpt;
+  llvm::Timer timer("Infer", "Infer");
+  if (timeOpt) {
+    timer.startTimer();
+  }
+  for (unsigned i = 0; i < iterations; i++) {
+    auto runErr = hostManager_->runNetworkBlocking(modelPathOpt[0], bindings);
+    EXIT_ON_ERR(std::move(runErr));
+  }
+  if (timeOpt) {
+    timer.stopTimer();
+    llvm::outs() << llvm::formatv("Wall time per item (s): {0:f4}\n",
+                                  timer.getTotalTime().getWallTime() /
+                                      iterations / batchSize);
+  }
+}
+
+void Loader::generateAndSerializeQuantizationInfos(
+    PlaceholderBindings &bindings) {
+  assert(!dumpProfileFileOpt.empty() &&
+         "Filename to dump serialized profile to must not be empty.");
+  std::vector<NodeQuantizationInfo> QI =
+      quantization::generateNodeQuantizationInfos(
+          bindings, F_, loweredMap_, quantizationSchema, quantizationPrecision);
+  serializeToYaml(dumpProfileFileOpt, QI);
+}
+
+Loader::Loader() {
   if (modelPathOpt.size() == 1) {
     if (llvm::sys::fs::is_directory(*modelPathOpt.begin())) {
       caffe2NetDescFilename_ = modelPathOpt[0] + "/predict_net.pb";
@@ -414,7 +474,14 @@ Loader::Loader(int argc, char **argv) {
     caffe2NetDescFilename_ = modelPathOpt[0];
     caffe2NetWeightFilename_ = modelPathOpt[1];
   }
+  M_.reset(new Module);
 
-  EE_.setBackend(ExecutionBackend);
-  F_ = EE_.getModule().createFunction(modelPathOpt[0]);
+  std::vector<std::unique_ptr<runtime::DeviceConfig>> configs =
+      generateDeviceConfigs(loadDeviceConfigsFileOpt, numDevices,
+                            ExecutionBackend);
+
+  hostManager_ = llvm::make_unique<runtime::HostManager>(std::move(configs));
+  backend_ = createBackend(ExecutionBackend);
+  F_ = M_->createFunction(modelPathOpt[0]);
+  functionName_ = modelPathOpt[0];
 }

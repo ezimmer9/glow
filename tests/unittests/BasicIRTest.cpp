@@ -81,6 +81,7 @@ TEST(IR, uniqueTypes) {
 TEST(IR, basicQuantizedTypes) {
   // Quantized types
   TEST_QUANT_TYPE(Int8QTy, int8_t, INT8, 0.3f, -45);
+  TEST_QUANT_TYPE(UInt8QTy, uint8_t, UINT8, 0.3f, -45);
   TEST_QUANT_TYPE(Int16QTy, int16_t, INT16, 0.3f, -45);
   TEST_QUANT_TYPE(Int32QTy, int32_t, INT32, 0.3f, -45);
 
@@ -159,7 +160,7 @@ TEST(IR, allInstrs) {
 
     builder.createCopyInst("", I1, I0);
     builder.createConvolutionInst("", I3, I1, F0, B0, {7, 7}, {2, 2},
-                                  {3, 3, 3, 3}, 1);
+                                  {3, 3, 3, 3}, 1, 1);
     builder.createMaxPoolInst("", I4, I0, {7, 7}, {2, 2}, {3, 3, 3, 3});
     builder.createSigmoidInst("", I1, I0);
     builder.createTanhInst("", I1, I0);

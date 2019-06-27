@@ -122,19 +122,21 @@ In order to build Glow on Ubuntu it is necessary to install a few packages. The
 following command should install the required dependencies:
 
   ```bash
-  sudo apt-get install clang clang-6.0 cmake graphviz libpng-dev \
-      libprotobuf-dev llvm-6.0 ninja-build protobuf-compiler wget \
+  sudo apt-get install clang clang-8 cmake graphviz libpng-dev \
+      libprotobuf-dev llvm-8 llvm-8-dev ninja-build protobuf-compiler wget \
       opencl-headers libgoogle-glog-dev
   ```
+[Note: building Glow on Ubuntu 16.04 with llvm-7 fails because llvm-7 xenial distribution
+uses an older c++ ABI]
 
 It may be desirable to use `update-alternatives` to manage the version of
 clang/clang++:
 
   ```bash
   sudo update-alternatives --install /usr/bin/clang clang \
-      /usr/lib/llvm-6.0/bin/clang 50
+      /usr/lib/llvm-8/bin/clang 50
   sudo update-alternatives --install /usr/bin/clang++ clang++ \
-      /usr/lib/llvm-6.0/bin/clang++ 50
+      /usr/lib/llvm-8/bin/clang++ 50
   ```
 
 Glow uses the system default C/C++ compiler (/usr/bin/c++), and so you may also
@@ -227,7 +229,7 @@ To run these programs, build Glow in Release mode, then run the following comman
 to download the cifar10, mnist and ptb databases.
 
   ```bash
-  python ../glow/utils/download_test_db.py --all
+  python ../glow/utils/download_datasets_and_models.py --all-datasets
   ```
 
 Now run the examples. Note that the databases should be in the current working

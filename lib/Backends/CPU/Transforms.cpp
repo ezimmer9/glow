@@ -54,6 +54,11 @@ static Node *optimizeCPUConv(ConvolutionNode *CN, Function *F) {
     return nullptr;
   }
 
+  // This optimization is not supported with Dilation currently.
+  if (CN->getDilation() != 1) {
+    return nullptr;
+  }
+
   // Create a new constant filter with the layout [D/8, K, K, C, 8];
   TypeRef filterTy = filter->getType();
   auto dims = filterTy->dims();
@@ -115,7 +120,9 @@ static Node *optimizeCPUMaxSplat(MaxNode *MN, Function *F) {
 }
 
 bool CPUBackend::transformPostLowering(Function *F,
-                                       const CompilationContext &) const {
+                                       CompilationContext &) const {
+  LOG_SCOPE(F->getLogContext(), "CPUBackend::transformPostLowering")
+
   bool changed = false;
   for (auto &node : F->getNodes()) {
     // Try to replace generic convolution with cpu-optimized version.

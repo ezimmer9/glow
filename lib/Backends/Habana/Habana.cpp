@@ -15,6 +15,7 @@
  */
 
 #include "Habana.h"
+#include "HabanaUtils.h"
 
 #include "glow/Graph/PlaceholderBindings.h"
 #include "glow/IR/IR.h"
@@ -29,22 +30,19 @@
 
 #include "perf_lib_layer_params.h"
 
+#include <chrono>
+#include <glog/logging.h>
 #include <mutex>
 #include <unordered_map>
 
 using namespace glow;
 
-// TODO: A failed status probably shouldn't be an assert. We should
-// fail gracefully.
-#define chk(X) GLOW_ASSERT((X) == synSuccess)
-
-/// It isn't clear what's threadsafe in Synapse.  Lock everything for now.
-static std::mutex synapseLock;
-
 /// Get a path to a temporary file for the compiled recipe.
-static std::string getRecipeFile() {
+static llvm::Expected<std::string> getRecipeFile() {
   llvm::SmallString<64> path;
-  GLOW_ASSERT(!llvm::sys::fs::createTemporaryFile("glow", "recipe", path));
+  auto err = llvm::sys::fs::createTemporaryFile("glow", "recipe", path);
+  RETURN_ERR_IF_NOT(
+      !err, strFormat("Unable to create recipe file at %s", path.str().data()));
   return path.str();
 }
 
@@ -53,9 +51,9 @@ static synDataType getSynType(ElemKind kind) {
   switch (kind) {
   case ElemKind::FloatTy:
     return syn_type_single;
-  case ElemKind::Float16Ty:
-    return syn_type_half;
   case ElemKind::Int8QTy:
+    return syn_type_fixed;
+  case ElemKind::UInt8QTy:
     return syn_type_fixed;
   case ElemKind::Int16QTy:
     return syn_type_int16;
@@ -69,10 +67,9 @@ static synDataType getSynType(ElemKind kind) {
     return syn_type_int32;
   case ElemKind::UInt8FusedQTy:
     return syn_type_fixed;
-  case ElemKind::BoolTy:
-    GLOW_UNREACHABLE("Unhandled ElemKind: BoolTy");
+  default:
+    LOG(FATAL) << "Unsupported data type: " << Type::getElementName(kind).str();
   }
-  GLOW_UNREACHABLE("Unhandled data type");
 }
 
 static const char *getKernelSuffix(ElemKind kind) {
@@ -84,7 +81,7 @@ static const char *getKernelSuffix(ElemKind kind) {
   case ElemKind::FloatTy:
     return "_f32";
   default:
-    GLOW_UNREACHABLE("Unhandled data type");
+    LOG(FATAL) << "Unsupported data type: " << Type::getElementName(kind).str();
   }
 }
 
@@ -92,73 +89,12 @@ static std::string getKernelName(llvm::StringRef kernelBase, ElemKind kind) {
   return std::string(kernelBase) + getKernelSuffix(kind);
 }
 
-/// If \p PH is an output placeholder, \returns the SaveNode.
-static SaveNode *getOutputSave(Function *F, Placeholder *PH) {
-  for (auto &use : PH->getUsers()) {
-    if (auto *save = llvm::dyn_cast<SaveNode>(use.getUser())) {
-      if (save->getParent() == F && save->getPlaceholder() == PH) {
-        return save;
-      }
-    }
-  }
-  return nullptr;
-}
-
 namespace {
-/// Parameters for pooling operation.
-struct synPoolParams {
-  // Padding
-  int pWbegin;
-  int pWend;
-  int pHbegin;
-  int pHend;
-  // Kernel
-  int kW;
-  int kH;
-  // Stride
-  int sW;
-  int sH;
-  // Dilation
-  int dilW;
-  int dilH;
-  int poolingConvention;
-
-  synPoolParams()
-      : pWbegin(0), pWend(0), pHbegin(0), pHend(0), kW(1), kH(1), sW(1), sH(1),
-        dilW(1), dilH(1), poolingConvention(0) {}
-};
-
-/// Habana Synapse device.
-class Device final {
-  /// Device identifier, used for Synapse API calls.
-  uint32_t id_;
-
-public:
-  /// Initialize the device.
-  Device() {
-    chk(synInitialize());
-    chk(synAcquireDevice(&id_, nullptr));
-  }
-
-  /// Destroy the device.
-  ~Device() { chk(synDestroy()); }
-
-  /// Non-copyable, non-movable.
-  ///@{
-  Device(const Device &) = delete;
-  Device(Device &&) = delete;
-  Device &operator=(const Device &) = delete;
-  Device &operator=(Device &&) = delete;
-  ///@}
-
-  /// Get the stored identifier.
-  uint32_t getID() const { return id_; }
-};
 
 /// Enum describing how the tensor will be used by the model.
 enum class IOType {
-  /// Infer the tensor's usage from the nodes using it.
-  Default,
+  /// Intermediate result between nodes.
+  Intermediate,
   /// Tensor is a model input.
   Input,
   /// Tensor is a model output.
@@ -191,12 +127,14 @@ public:
 
   /// Constructor. Create a tensor from Glow IR Value \p V.
   TensorHandle(TypeRef V, llvm::StringRef name, void *buffer = nullptr,
-               IOType ioType = IOType::Default)
+               IOType ioType = IOType::Intermediate)
       : buffer_(buffer), name_(name) {
     if (!buffer_) {
-      assert(V->getSizeInBytes());
-      buffer_ = malloc(V->getSizeInBytes());
-      assert(buffer_);
+      DCHECK_GT(V->getSizeInBytes(), 0);
+      DCHECK(ioType != IOType::Static);
+      buffer_ = malloc(ioType == IOType::Intermediate ? sizeof(float)
+                                                      : V->getSizeInBytes());
+      DCHECK_NOTNULL(buffer_);
       allocated_ = true;
     }
 
@@ -204,7 +142,7 @@ public:
     auto dims = V->dims();
     dims_.append(dims.begin(), dims.end());
 
-    assert(dims.size() <= SYN_MAX_TENSOR_DIM);
+    DCHECK_LE(dims.size(), SYN_MAX_TENSOR_DIM);
     llvm::SmallVector<unsigned, SYN_MAX_TENSOR_DIM> rdims(dims.rbegin(),
                                                           dims.rend());
 
@@ -217,23 +155,6 @@ public:
     // Model params need to be floats, even if the tensor is integral or
     // quantized.
     if (ioType == IOType::Static) {
-      // Quantized types: dequantize into float buffer.
-      if (V->isQuantizedType()) {
-        // Check that a weight buffer was passed in; these are model params.
-        assert(!allocated_);
-        Type type = *V;
-        if (V->getElementType() == ElemKind::UInt8FusedQTy) {
-          // Fused quantized values just need to be passed through in raw form.
-          type = Type(ElemKind::Int8QTy, V->dims(), 1.0, 0);
-        }
-        Tensor DT = quantization::dequantizeTensor(Tensor(buffer_, &type),
-                                                   ElemKind::FloatTy);
-        auto bytes = DT.getSizeInBytes();
-        buffer_ = malloc(bytes);
-        memcpy(buffer_, DT.getUnsafePtr(), bytes);
-        allocated_ = true;
-      }
-
       // Int32ITy: Cast to floats.
       if (V->getElementType() == ElemKind::Int32ITy) {
         float *floats_ = (float *)malloc(V->size() * sizeof(float));
@@ -258,15 +179,23 @@ public:
     // Create tensor descriptor, with quantization params if needed.
     synTensorDescriptor desc(elemType, rdims.size(), rdims.data(), buffer_,
                              synMemoryHost, false, name_.data());
-    if (V->isQuantizedType() &&
-        V->getElementType() != ElemKind::UInt8FusedQTy) {
-      desc.m_quantizationParams[0].m_zp = V->getOffset();
-      desc.m_quantizationParams[0].m_scale = V->getScale();
+    if (V->isQuantizedType()) {
+      if (V->getElementType() == ElemKind::UInt8FusedQTy) {
+        desc.m_quantizationParams[0].m_zp = 0;
+        desc.m_quantizationParams[0].m_scale = 1;
+      } else {
+        desc.m_quantizationParams[0].m_zp = V->getOffset();
+        desc.m_quantizationParams[0].m_scale = V->getScale();
+      }
+
       desc.m_quantizationParams[0].m_qDataType = elemType;
+      if (ioType == IOType::Static) {
+        desc.m_isQuantized = true;
+      }
     }
 
-    chk(synCreateTensor(&desc, &tensor_, ioType == IOType::Output, false,
-                        ioType == IOType::Static));
+    chk_kill(synCreateTensor(&desc, &tensor_, ioType == IOType::Output, false,
+                             ioType == IOType::Static));
     valid_ = true;
   }
 
@@ -293,7 +222,7 @@ public:
   /// Destroy the managed tensor.
   ~TensorHandle() {
     if (valid_) {
-      chk(synDestroyTensor(tensor_));
+      chk_kill(synDestroyTensor(tensor_));
 
       if (allocated_) {
         free(buffer_);
@@ -306,6 +235,9 @@ public:
 
   /// Get the underlying data buffer.
   void *getData() const { return buffer_; }
+
+  /// Get the name of the managed tensor
+  const std::string &getName() const { return name_; }
 
   /// Get the dimensions of the stored tensor.
   llvm::ArrayRef<unsigned> dims() const { return dims_; }
@@ -320,8 +252,8 @@ HabanaIOBuffer::HabanaIOBuffer(
     const std::unordered_map<const Placeholder *, off_t> &offsets)
     : deviceId_(deviceId), buffer_(buffer), offsets_(offsets) {}
 
-uint8_t *HabanaIOBuffer::get(const Placeholder *p) const {
-  GLOW_ASSERT(offsets_.count(p) > 0 && "Placeholder not in IO buffer!");
+llvm::Expected<uint8_t *> HabanaIOBuffer::get(const Placeholder *p) const {
+  RETURN_ERR_IF_NOT(offsets_.count(p) > 0, "Placeholder not in IO buffer!");
   return buffer_ + offsets_.find(p)->second;
 }
 
@@ -348,8 +280,8 @@ HabanaIOBufferPool::HabanaIOBufferPool(uint32_t deviceId,
   // for the whole pool.
   perBufferSize_ = currentOffset;
   allBuffersSize_ = perBufferSize_ * numBuffers_;
-  chk(synMalloc(deviceId_, allBuffersSize_, synMemFlags::synMemHost,
-                (void **)&buffer_));
+  chk_kill(synMalloc(deviceId_, allBuffersSize_, synMemFlags::synMemHost,
+                     (void **)&buffer_));
 
   // Create HabanaIOBuffer instances for the pool with offsets into buffer_ that
   // are perBufferSize_ apart.
@@ -362,9 +294,9 @@ HabanaIOBufferPool::HabanaIOBufferPool(uint32_t deviceId,
 }
 
 HabanaIOBufferPool::~HabanaIOBufferPool() {
-  GLOW_ASSERT(ioBuffers_.size() == numBuffers_ &&
-              "IO buffer pool destroyed while some buffers still in use!");
-  chk(synFree(deviceId_, buffer_, synMemFlags::synMemHost));
+  CHECK_EQ(ioBuffers_.size(), numBuffers_)
+      << "IO buffer pool destroyed while some buffers still in use!";
+  chk_kill(synFree(deviceId_, buffer_, synMemFlags::synMemHost));
 }
 
 std::unique_ptr<HabanaIOBuffer> HabanaIOBufferPool::get() {
@@ -426,22 +358,111 @@ bool HabanaWaitHandle::wait() {
   return status == synSuccess;
 }
 
-HabanaFunction::HabanaFunction(const runtime::RuntimeBundle &bundle,
-                               const std::string &recipeName,
-                               PlaceholderList &&inputs,
-                               PlaceholderList &&outputs)
-    : CompiledFunction(bundle), recipeName_(recipeName),
-      inputs_(std::move(inputs)), outputs_(std::move(outputs)) {}
+/// Retrieve and dump debug info about a topology.
+static llvm::Error dumpTopologyInfo(uint32_t deviceId, uint64_t topologyId) {
+  uint32_t numOfInputs;
+  uint32_t numOfOutputs;
+  uint32_t numOfIntermediates;
+  chk(synGetIOTensorsAmount(deviceId, topologyId, numOfInputs, numOfOutputs,
+                            numOfIntermediates));
 
-HabanaFunction::~HabanaFunction() {
-  GLOW_ASSERT(!llvm::sys::fs::remove(recipeName_));
+  using TensorNames = char[ENQUEUE_TENSOR_NAME_MAX_SIZE];
+  auto inputTensorNames = llvm::make_unique<TensorNames[]>(numOfInputs);
+  auto outputTensorNames = llvm::make_unique<TensorNames[]>(numOfOutputs);
+  auto intermediateTensorNames =
+      llvm::make_unique<TensorNames[]>(numOfIntermediates);
+
+  chk(synGetTensorsName(deviceId, topologyId, inputTensorNames.get(),
+                        numOfInputs, outputTensorNames.get(), numOfOutputs,
+                        intermediateTensorNames.get(), numOfIntermediates));
+
+  for (uint32_t i = 0; i < numOfInputs; i++) {
+    VLOG(1) << "Topology input: " << inputTensorNames[i];
+  }
+  for (uint32_t i = 0; i < numOfOutputs; i++) {
+    VLOG(1) << "Topology output: " << outputTensorNames[i];
+  }
+  for (uint32_t i = 0; i < numOfIntermediates; i++) {
+    VLOG(1) << "Topology intermediates: " << intermediateTensorNames[i];
+  }
+
+  return llvm::Error::success();
 }
 
-void HabanaFunction::setupRuns() {}
+HabanaFunction::HabanaFunction(const runtime::RuntimeBundle &bundle,
+                               const std::string &recipeName, Function *F)
+    : CompiledFunction(bundle), recipeName_(recipeName) {
+  findIOPlaceholders(F);
+}
 
-void HabanaFunction::beforeRun(const PlaceholderBindings &ctx) {}
+/// \returns true if \p V is used in \p F; false otherwise.
+static bool usedInFunction(const Placeholder *V, const Function *F) {
+  for (auto const &U : V->getUsers()) {
+    if (U.getUser()->getParent() == F) {
+      return true;
+    }
+  }
+  return false;
+}
 
-void HabanaFunction::execute(ExecutionContext *context) {
+/// \returns true if \p dst is capable of handling a partial tensor as input
+/// from \p src.
+static bool allowsPartialInput(const Node *src, const Node *dst) {
+  // If N is used as the indices or weights of a sparse lookup, it is safe to
+  // access a partial tensor.
+  if (auto *SLS =
+          llvm::dyn_cast<FusedRowwiseQuantizedSparseLengthsWeightedSumNode>(
+              dst)) {
+    return src == SLS->getIndices() || src == SLS->getWeights();
+  } else if (auto *SLS = llvm::dyn_cast<SparseLengthsWeightedSumNode>(dst)) {
+    return src == SLS->getIndices() || src == SLS->getWeights();
+  } else if (auto *SLS = llvm::dyn_cast<SparseLengthsSumNode>(dst)) {
+    return src == SLS->getIndices();
+  }
+  return false;
+}
+
+/// \returns true if \p V is capable of handling a partial tensor as input.
+static bool allowsPartialInput(const Placeholder *V, const Function *F) {
+  for (auto const &U : V->getUsers()) {
+    if (U.getUser()->getParent() != F) {
+      continue;
+    }
+    if (!allowsPartialInput(*U.get(), U.getUser())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void HabanaFunction::findIOPlaceholders(Function *F) {
+  for (auto const &V : F->getParent()->getPlaceholders()) {
+    if (!usedInFunction(V, F)) {
+      continue;
+    }
+    if (getOutputSave(F, V)) {
+      outputs_.push_back(V);
+    } else {
+      inputs_.push_back(V);
+      if (allowsPartialInput(V, F)) {
+        partialInputs_.insert(V);
+      }
+    }
+  }
+}
+
+HabanaFunction::~HabanaFunction() {
+  CHECK(!llvm::sys::fs::remove(recipeName_))
+      << "Failed to remove file at " << recipeName_;
+  CHECK(!llvm::sys::fs::remove(recipeName_ + ".bin"))
+      << "Failed to remove file at " << recipeName_ << ".bin";
+}
+
+llvm::Error HabanaFunction::execute(ExecutionContext *context) {
+  auto *tc = context->getTraceContext();
+  TRACE_EVENT_SCOPE_NAMED(tc, TraceLevel::RUNTIME, "execute", exEvent);
+  exEvent.addArg("recipe", recipeName_);
+
   uint32_t deviceId =
       static_cast<HabanaBindings *>(context->getDeviceBindings())
           ->getDeviceId();
@@ -456,63 +477,83 @@ void HabanaFunction::execute(ExecutionContext *context) {
   std::vector<EnqueueTensorInfo> outputInfo;
 
   // Set up input buffers and record bindings for enqueuing.
+  TRACE_EVENT_SCOPE_NAMED(tc, TraceLevel::RUNTIME, "copyInputs", ciEvent);
+  size_t tensors{0}, bytes{0};
   auto *bindings = context->getPlaceholderBindings();
   for (auto *P : getInputs()) {
     Tensor *T = bindings->get(P);
     if (!T) {
       T = bindings->get(bindings->getPlaceholderByName(P->getName()));
     }
-    GLOW_ASSERT(T);
+    tensors++;
+    RETURN_ERR_IF_NOT(T, "Failed to get input tensor.");
 
+    bool isPartial = partialInputs_.count(P);
     EnqueueTensorInfo eti;
     llvm::StringRef name = P->getName();
     eti.tensorName = name.data();
     eti.tensorSize = T->getSizeInBytes();
-    eti.pTensorData = (char *)ioBuffer->get(P);
+    uint8_t *ioBufferData;
+    ASSIGN_VALUE_OR_RETURN_ERR(ioBufferData, ioBuffer->get(P));
+    eti.pTensorData = (char *)ioBufferData;
+
+    bytes += eti.tensorSize;
 
     inputInfo.push_back(eti);
     // Copy from the tensor into the designated IO buffer.
-    memcpy(eti.pTensorData, T->getUnsafePtr(), eti.tensorSize);
+    memcpy(eti.pTensorData, T->getUnsafePtr(), T->getUnpaddedSizeInBytes());
+    if (!isPartial) {
+      memset(eti.pTensorData + T->getUnpaddedSizeInBytes(), 0,
+             T->getSizeInBytes() - T->getUnpaddedSizeInBytes());
+    }
   }
+  ciEvent.addArg("tensors", std::to_string(tensors));
+  ciEvent.addArg("bytes", std::to_string(bytes));
+  TRACE_EVENT_SCOPE_END_NAMED(ciEvent);
 
+  TRACE_EVENT_SCOPE_NAMED(tc, TraceLevel::RUNTIME, "registerOutputs", roEvent);
   // Set up output buffers and record bindings for enqueuing.
   for (auto *P : getOutputs()) {
     Tensor *T = bindings->get(P);
     if (!T) {
       T = bindings->get(bindings->getPlaceholderByName(P->getName()));
     }
-    GLOW_ASSERT(T);
+    RETURN_ERR_IF_NOT(T, "Failed to get output tensor.");
 
     EnqueueTensorInfo eti;
     llvm::StringRef name = P->getName();
     eti.tensorName = name.data();
-    eti.tensorSize = T->getSizeInBytes();
-    eti.pTensorData = (char *)ioBuffer->get(P);
+    eti.tensorSize = T->getUnpaddedSizeInBytes();
+    uint8_t *ioBufferData;
+    ASSIGN_VALUE_OR_RETURN_ERR(ioBufferData, ioBuffer->get(P));
+    eti.pTensorData = (char *)ioBufferData;
 
     outputInfo.push_back(eti);
   }
 
   EnqueueTensorInfo noInputEti = {"unused", (char *)nullptr, 0};
+  TRACE_EVENT_SCOPE_END_NAMED(roEvent);
 
   // Enqueue the run and wait for it to come back.
   synWaitHandle handle;
-  {
-    // Activate and enqueue need to be atomic.
-    std::lock_guard<std::mutex> g(synapseLock);
-    chk(synActivateTopology(deviceId, topologyId));
-    chk(synEnqueueByName(
-        deviceId, inputInfo.empty() ? &noInputEti : inputInfo.data(),
-        inputInfo.size(), outputInfo.data(), outputInfo.size(), &handle));
+  if (VLOG_IS_ON(1)) {
+    RETURN_IF_ERR(dumpTopologyInfo(deviceId, topologyId));
   }
+  TRACE_EVENT_SCOPE_NAMED(tc, TraceLevel::RUNTIME, "synEnqueue", seEvent);
+  auto res = synEnqueueByName(
+      deviceId, inputInfo.empty() ? &noInputEti : inputInfo.data(),
+      inputInfo.size(), outputInfo.data(), outputInfo.size(), &handle);
+  seEvent.addArg("result", statusStr(res));
+  if (res != synSuccess) {
+    return MAKE_ERR(strFormat("synEnqueueByName failed: %s", statusStr(res)));
+  }
+  TRACE_EVENT_SCOPE_END_NAMED(seEvent);
 
   static_cast<HabanaBindings *>(context->getDeviceBindings())
       ->setHandle(HabanaWaitHandle(deviceId, handle, std::move(inputInfo),
                                    std::move(outputInfo)));
+  return llvm::Error::success();
 }
-
-void HabanaFunction::afterRun(const PlaceholderBindings &ctx) {}
-
-void HabanaFunction::tearDownRuns() {}
 
 static std::unique_ptr<synConvolutionParams> makeSynConvolutionParams(
     llvm::ArrayRef<unsigned_t> kernel, llvm::ArrayRef<unsigned_t> stride,
@@ -526,8 +567,10 @@ static std::unique_ptr<synConvolutionParams> makeSynConvolutionParams(
   params->dH = stride[0];
   params->dW = stride[1];
   // Padding
-  params->padH = pad[0];
-  params->padW = pad[1];
+  params->padT = pad[0];
+  params->padL = pad[1];
+  params->padB = pad[2];
+  params->padR = pad[3];
   // Dilation
   params->dilW = 1;
   params->dilH = 1;
@@ -539,26 +582,26 @@ static std::unique_ptr<synConvolutionParams> makeSynConvolutionParams(
   return params;
 }
 
-static std::unique_ptr<synPoolParams>
+static std::unique_ptr<ns_SpatialReduction::Params>
 makeSynPoolParams(llvm::ArrayRef<unsigned_t> kernel,
                   llvm::ArrayRef<unsigned_t> stride,
                   llvm::ArrayRef<unsigned_t> pad) {
-  auto params = llvm::make_unique<synPoolParams>();
+  auto params = llvm::make_unique<ns_SpatialReduction::Params>();
 
   // Kernel
-  params->kW = kernel[0];
-  params->kH = kernel[1];
+  params->kernel_w = kernel[0];
+  params->kernel_h = kernel[1];
   // Stride
-  params->sW = stride[0];
-  params->sH = stride[1];
+  params->stride_w = stride[0];
+  params->stride_h = stride[1];
   // Padding
-  params->pWbegin = pad[0];
-  params->pWend = pad[0];
-  params->pHbegin = pad[1];
-  params->pHend = pad[1];
+  params->pad_h_begin = pad[0];
+  params->pad_w_begin = pad[1];
+  params->pad_h_end = pad[2];
+  params->pad_w_end = pad[3];
   // Dilation
-  params->dilW = 1;
-  params->dilH = 1;
+  params->dilation_w = 1;
+  params->dilation_h = 1;
 
   return params;
 }
@@ -592,6 +635,16 @@ makeSynSliceAxisParams(unsigned axis, unsigned axes, unsigned outputAxisSize,
   params->begin = axisOffset;
   params->end = axisOffset + outputAxisSize;
 
+  return params;
+}
+
+static std::unique_ptr<ns_LrnKernel::Params>
+makeLrnParams(float alpha, float beta, float knorm, int halfWindowSize) {
+  auto params = llvm::make_unique<ns_LrnKernel::Params>();
+  params->alpha = alpha;
+  params->beta = beta;
+  params->knorm = knorm;
+  params->nsize = 2 * halfWindowSize + 1;
   return params;
 }
 
@@ -651,18 +704,21 @@ allocateGraphTensors(Function *F) {
       continue;
     }
     if (auto *save = getOutputSave(F, V)) {
-      // We want to avoid emitting copies for save nodes by simply marking the
-      // save input as an "output" tensor.  The exceptions are when the input
-      // is itself a placeholder/constant, or a reshape.  (The reshape case is
-      // likely a Synapse bug.)
+      // Naively, we'd generate a memcpy for any SaveNode, but that's a waste
+      // so we want to avoid it.  We can optimize it away by mapping the
+      // SaveNode's input node (N, below) to the output tensor, and then simply
+      // not generating a memcpy if the SaveNode itself has no associated
+      // tensor.
       auto *N = save->getInput().getNode();
-      Node *proxy =
-          (llvm::isa<Storage>(N) || llvm::isa<HabanaReshapeNode>(N)) ? save : N;
-      tensors.emplace(proxy, TensorHandle(V->getType(), V->getName(), nullptr,
-                                          IOType::Output));
+      if (llvm::isa<Storage>(N) || llvm::isa<HabanaReshapeNode>(N) ||
+          N->getNumUsers() > 1) {
+        N = save;
+      }
+      tensors.emplace(
+          N, TensorHandle(V->getType(), V->getName(), nullptr, IOType::Output));
     } else {
-      tensors.emplace(V, TensorHandle(V->getType(), V->getName(), nullptr,
-                                      IOType::Default));
+      tensors.emplace(
+          V, TensorHandle(V->getType(), V->getName(), nullptr, IOType::Input));
     }
   }
 
@@ -677,55 +733,23 @@ allocateGraphTensors(Function *F) {
     }
     auto result = N.getNthResult(0);
     tensors.emplace(&N, TensorHandle(result.getType(), N.getName(), nullptr,
-                                     IOType::Default));
+                                     IOType::Intermediate));
   }
   return tensors;
 }
 
-namespace {
-struct IOPlaceholders {
-  PlaceholderList inputs;
-  PlaceholderList outputs;
-};
-} // namespace
-
-static bool usedInFunction(Placeholder *V, Function *F) {
-  for (auto const &U : V->getUsers()) {
-    if (U.getUser()->getParent() == F) {
-      return true;
-    }
-  }
-  return false;
-}
-
-IOPlaceholders findIOPlaceholders(Function *F) {
-  IOPlaceholders io;
-  for (auto &V : F->getParent()->getPlaceholders()) {
-    if (!usedInFunction(V, F)) {
-      continue;
-    }
-    if (getOutputSave(F, V)) {
-      io.outputs.push_back(V);
-    } else {
-      io.inputs.push_back(V);
-    }
-  }
-  return io;
-}
-
-std::unique_ptr<CompiledFunction>
+llvm::Expected<std::unique_ptr<CompiledFunction>>
 HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
   chk(synCreateGraph(synDeviceGoya));
 
   // Allocate all the tensors.
   auto tensors = allocateGraphTensors(F);
-  auto ios = findIOPlaceholders(F);
 
   // Keep references to any node parameters
   // until the compilation is done.
   std::vector<std::unique_ptr<synConvolutionParams>> convParams;
   std::vector<std::unique_ptr<synTransposeParams>> transposeParams;
-  std::vector<std::unique_ptr<synPoolParams>> poolParams;
+  std::vector<std::unique_ptr<ns_SpatialReduction::Params>> poolParams;
   std::vector<std::unique_ptr<synFCParams>> fcParams;
   std::vector<std::unique_ptr<ns_FullyConnected::Params>> fcFp32Params;
   std::vector<std::unique_ptr<ns_Reduction::Params>> reductionParams;
@@ -733,6 +757,9 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
   std::vector<std::unique_ptr<ns_ConstantKernel::Params>> constantParams;
   std::vector<std::unique_ptr<ns_TileKernel::Params>> tileParams;
   std::vector<std::unique_ptr<unsigned>> concatParams;
+  std::vector<std::unique_ptr<ns_GatherKernel::Params>> gatherParams;
+  std::vector<std::unique_ptr<ns_LrnKernel::Params>> lrnParams;
+  std::vector<std::unique_ptr<synGEMMParams>> gemmParams;
 
   // Keep references to tensor pointer arrays passed into multi-input nodes
   // until the compilation is done.
@@ -741,13 +768,16 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
   std::vector<TensorHandle> tempTensors;
 
   for (const auto &I : F->getNodes()) {
+    RETURN_ERR_IF_NOT(isOpSupported(I), strFormat("Unsupported operator: %s",
+                                                  I.getDebugDesc().c_str()));
+
     switch (I.getKind()) {
     case Kinded::Kind::HabanaFullyConnectedNodeKind: {
       auto *NI = llvm::cast<HabanaFullyConnectedNode>(&I);
 
       if (NI->getInput().getType()->isQuantizedType()) {
         auto params = llvm::make_unique<synFCParams>();
-        params->activation.reluEnable = false;
+        params->activation.reluEnable = NI->getDoRelu();
         chk(synFullyConnected(
             tensors[NI->getInput()].get(), tensors[NI->getWeights()].get(),
             tensors[NI->getBias()].get(), tensors[NI].get(), *params, ""));
@@ -758,12 +788,21 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
         inputs.push_back(tensors[NI->getWeights()].get());
         inputs.push_back(tensors[NI->getBias()].get());
 
-        auto params = makeFCFPParams(false);
+        auto params = makeFCFPParams(NI->getDoRelu());
+        const char *fcLayoutIn[3] = {"CB", "CK", ""};
+        const char *fcLayoutOut[1] = {"KB"};
+        const char **inLayout = {nullptr};
+        const char **outLayout = {nullptr};
+        if (isVersionBiggerEqualTo("0.1.9")) {
+          inLayout = fcLayoutIn;
+          outLayout = fcLayoutOut;
+        }
+
         chk(synCreateGenericNode(
             inputs.data(), &tensors[NI].get(), 3, 1, params.get(),
             getKernelName("fully_connected", NI->getResult().getElementType())
                 .c_str(),
-            NI->getName().data(), nullptr, nullptr));
+            NI->getName().data(), inLayout, outLayout));
         multiInputs.emplace_back(std::move(inputs));
         fcFp32Params.emplace_back(std::move(params));
       }
@@ -853,7 +892,7 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
     }
     case Kinded::Kind::MaxPoolNodeKind: {
       auto *PI = llvm::cast<MaxPoolNode>(&I);
-      std::unique_ptr<synPoolParams> params =
+      auto params =
           makeSynPoolParams(PI->getKernels(), PI->getStrides(), PI->getPads());
       chk(synCreateGenericNode(
           &tensors[PI->getInput()].get(), &tensors[PI].get(), 1, 1,
@@ -865,7 +904,7 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
     }
     case Kinded::Kind::AvgPoolNodeKind: {
       auto *PI = llvm::cast<AvgPoolNode>(&I);
-      std::unique_ptr<synPoolParams> params =
+      auto params =
           makeSynPoolParams(PI->getKernels(), PI->getStrides(), PI->getPads());
       chk(synCreateGenericNode(
           &tensors[PI->getInput()].get(), &tensors[PI].get(), 1, 1,
@@ -961,12 +1000,16 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
       if (MI->getLHS().getType()->isQuantizedType()) {
         // Let GEMM run on MME via FullyConnected node.
         // MME only runs on quantized types, e.g., int8 or int16.
-        auto params = llvm::make_unique<synFCParams>();
-        params->activation.reluEnable = false;
-        chk(synFullyConnected(tensors[MI->getLHS()].get(),
-                              tensors[MI->getRHS()].get(), nullptr,
-                              tensors[MI].get(), *params, ""));
-        fcParams.emplace_back(std::move(params));
+        // The default params are OK - don't transpose A and B
+        auto params = llvm::make_unique<synGEMMParams>();
+        std::vector<synTensor> inputs;
+        inputs.push_back(tensors[MI->getLHS()].get());
+        inputs.push_back(tensors[MI->getRHS()].get());
+        chk(synCreateGenericNode(inputs.data(), &tensors[MI].get(),
+                                 inputs.size(), 1, nullptr, "gemm",
+                                 MI->getName().data(), nullptr, nullptr));
+        gemmParams.emplace_back(std::move(params));
+
       } else {
         std::vector<synTensor> inputs;
         inputs.push_back(tensors[MI->getLHS()].get());
@@ -1009,6 +1052,18 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
                                 tensors[NI->getAddend()].get(), *params, ""));
 
       convParams.emplace_back(std::move(params));
+      break;
+    }
+    case Kinded::Kind::LocalResponseNormalizationNodeKind: {
+      auto *NI = llvm::cast<LocalResponseNormalizationNode>(&I);
+      std::unique_ptr<ns_LrnKernel::Params> params = makeLrnParams(
+          NI->getAlpha(), NI->getBeta(), NI->getK(), NI->getHalfWindowSize());
+
+      chk(synCreateGenericNode(&tensors[NI->getInput()].get(),
+                               &tensors[NI].get(), 1, 1, (void *)params.get(),
+                               "lrn_f32", NI->getName().str().c_str(), nullptr,
+                               nullptr));
+      lrnParams.emplace_back(std::move(params));
       break;
     }
     case Kinded::Kind::TransposeNodeKind: {
@@ -1102,7 +1157,21 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
           makeConcatParams(CI->getDim(), tensors[CI].dims().size());
       std::vector<synTensor> inputs;
       for (auto const &N : CI->getInputs()) {
-        inputs.push_back(tensors[N].get());
+        if (N.getNumUsers() > 1) {
+          std::string memcpyNodeName =
+              llvm::formatv("{0}_memcpy_{1}", N.getNode()->getName(),
+                            inputs.size())
+                  .str();
+          TensorHandle memcpy(N.getType(), memcpyNodeName);
+          chk(synCreateGenericNode(
+              &tensors[N].get(), &memcpy.get(), 1, 1, nullptr,
+              getKernelName("memcpy", N.getType()->getElementType()).c_str(),
+              memcpy.getName().c_str(), nullptr, nullptr));
+          inputs.push_back(memcpy.get());
+          tempTensors.emplace_back(std::move(memcpy));
+        } else {
+          inputs.push_back(tensors[N].get());
+        }
       }
 
       chk(synCreateGenericNode(inputs.data(), &tensors[CI].get(), inputs.size(),
@@ -1112,6 +1181,14 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
       concatParams.emplace_back(std::move(params));
       break;
     }
+    case Kinded::Kind::RescaleQuantizedNodeKind: {
+      auto *RI = llvm::cast<RescaleQuantizedNode>(&I);
+      chk(synCreateGenericNode(
+          &tensors[RI->getInput()].get(), &tensors[RI].get(), 1, 1, nullptr,
+          getKernelName("requant", RI->getResult().getElementType()).c_str(),
+          RI->getName().data(), nullptr, nullptr));
+      break;
+    }
     case Kinded::Kind::SaveNodeKind: {
       auto *CI = llvm::cast<SaveNode>(&I);
       if (tensors.count(CI)) {
@@ -1119,6 +1196,19 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
                                  &tensors[CI].get(), 1, 1, nullptr, "memcpy",
                                  CI->getName().data(), nullptr, nullptr));
       }
+      break;
+    }
+    case Kinded::Kind::SparseLengthsSumNodeKind: {
+      auto *RI = llvm::cast<SparseLengthsSumNode>(&I);
+      std::vector<synTensor> inputs = {
+          tensors[RI->getData()].get(),
+          tensors[RI->getIndices()].get(),
+          tensors[RI->getLengths()].get(),
+      };
+      chk(synCreateGenericNode(inputs.data(), &tensors[RI].get(), inputs.size(),
+                               1, nullptr, "sparse_lengths_sum_f32_f32",
+                               RI->getName().data(), nullptr, nullptr));
+      multiInputs.emplace_back(std::move(inputs));
       break;
     }
     case Kinded::Kind::SparseLengthsWeightedSumNodeKind: {
@@ -1131,6 +1221,19 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
       };
       chk(synCreateGenericNode(inputs.data(), &tensors[RI].get(), inputs.size(),
                                1, nullptr, "sparse_lengths_weighted_sum_f32",
+                               RI->getName().data(), nullptr, nullptr));
+      multiInputs.emplace_back(std::move(inputs));
+      break;
+    }
+    case Kinded::Kind::FusedRowwiseQuantizedSparseLengthsSumNodeKind: {
+      auto *RI = llvm::cast<FusedRowwiseQuantizedSparseLengthsSumNode>(&I);
+      std::vector<synTensor> inputs = {
+          tensors[RI->getData()].get(),
+          tensors[RI->getIndices()].get(),
+          tensors[RI->getLengths()].get(),
+      };
+      chk(synCreateGenericNode(inputs.data(), &tensors[RI].get(), inputs.size(),
+                               1, nullptr, "sparse_lengths_sum_u8_2D_f32_embed",
                                RI->getName().data(), nullptr, nullptr));
       multiInputs.emplace_back(std::move(inputs));
       break;
@@ -1151,26 +1254,49 @@ HabanaBackend::compile(Function *F, const BackendOptions &opts) const {
       multiInputs.emplace_back(std::move(inputs));
       break;
     }
+    case Kinded::Kind::GatherNodeKind: {
+      auto *gather = llvm::cast<GatherNode>(&I);
+      std::vector<synTensor> inputs = {tensors[gather->getData()].get(),
+                                       tensors[gather->getIndices()].get()};
+
+      auto params = llvm::make_unique<ns_GatherKernel::Params>();
+      params->axis =
+          gather->getData().dims().size() - gather->getBatchDims() - 1;
+
+      chk(synCreateGenericNode(
+          inputs.data(), &tensors[gather].get(), inputs.size(), 1, params.get(),
+          getKernelName("gather", gather->getResult().getElementType()).c_str(),
+          gather->getName().data(), nullptr, nullptr));
+
+      multiInputs.emplace_back(std::move(inputs));
+      gatherParams.emplace_back(std::move(params));
+      break;
+    }
     default: {
-      llvm::errs() << "Unhandled node: " << I.getDebugDesc() << "\n";
-      GLOW_UNREACHABLE("Unhandled node");
+      RETURN_ERR(strFormat("Unhandled node: %s", I.getDebugDesc().c_str()));
       break;
     }
     }
   }
 
   // Compile the graph.
-  auto recipeName = getRecipeFile();
+  std::string recipeName;
+  ASSIGN_VALUE_OR_RETURN_ERR(recipeName, getRecipeFile());
   CompilationAttribute compileParams[1];
   compileParams[0].type = VISUALIZATION;
   compileParams[0].u32 = 1;
-  chk(synCompileGraph(compileParams, 1, recipeName.c_str()));
+  LOG(INFO) << "Compiling " << F->getName().str() << " to " << recipeName;
+  auto start = TraceEvent::now();
 
+  // TODO: add a TRACE_EVENT entry
+  chk(synCompileGraph(compileParams, 1, recipeName.c_str()));
+  auto duration = TraceEvent::now() - start;
+  LOG(INFO) << "Compilation took " << duration / 1000.0 << " [ms]";
   chk(synDestroyGraph());
 
-  return llvm::make_unique<HabanaFunction>(runtime::RuntimeBundle::create(*F),
-                                           recipeName, std::move(ios.inputs),
-                                           std::move(ios.outputs));
+  return llvm::Expected<std::unique_ptr<CompiledFunction>>(
+      llvm::make_unique<HabanaFunction>(runtime::RuntimeBundle::create(*F),
+                                        recipeName, F));
 }
 
 static bool isQuantizedType(ElemKind kind) {
@@ -1204,7 +1330,12 @@ bool HabanaBackend::isOpSupported(const NodeInfo &NI) const {
     case Kinded::Kind::SplatNodeKind:
     case Kinded::Kind::SubNodeKind:
     case Kinded::Kind::TileNodeKind:
+    case Kinded::Kind::ConcatNodeKind:
+    case Kinded::Kind::TransposeNodeKind:
       return true;
+    case Kinded::Kind::RescaleQuantizedNodeKind:
+      return NI.allInputsAndOutputsHaveSameElemKind(
+          {ElemKind::Int8QTy, ElemKind::Int16QTy});
     default:
       return false;
     }
@@ -1238,9 +1369,15 @@ bool HabanaBackend::isOpSupported(const NodeInfo &NI) const {
   case Kinded::Kind::TanhNodeKind:
   case Kinded::Kind::TileNodeKind:
   case Kinded::Kind::TransposeNodeKind:
+  case Kinded::Kind::SparseLengthsSumNodeKind:
   case Kinded::Kind::SparseLengthsWeightedSumNodeKind:
+  case Kinded::Kind::FusedRowwiseQuantizedSparseLengthsSumNodeKind:
   case Kinded::Kind::FusedRowwiseQuantizedSparseLengthsWeightedSumNodeKind:
+  case Kinded::Kind::LocalResponseNormalizationNodeKind:
     return true;
+  case Kinded::Kind::GatherNodeKind:
+    // Gather is technically supported but currently appears to trigger bugs in
+    // large models.
   default:
     return false;
   }
@@ -1253,6 +1390,9 @@ bool HabanaBackend::shouldLower(const Node *N) const {
   case Kinded::Kind::TileNodeKind:
   case Kinded::Kind::ReluNodeKind:
   case Kinded::Kind::FullyConnectedNodeKind:
+  case Kinded::Kind::ConvolutionNodeKind:
+  case Kinded::Kind::SparseLengthsSumNodeKind:
+  case Kinded::Kind::FusedRowwiseQuantizedSparseLengthsSumNodeKind:
     return false;
   default:
     return true;
@@ -1360,7 +1500,24 @@ bool fuseConvRelu(Function *F, HabanaConvolutionNode &conv, ReluNode &relu) {
   return true;
 }
 
-/// Fuse any sum of Conv + Node into Node -> FusedConvAdd.
+/// Fuse fully connected followed by relu into a single FusedFCRelu node.
+bool fuseFCRelu(Function *F, HabanaFullyConnectedNode &fc, ReluNode &relu) {
+  // fully connected should have only a single use.
+  if (!fc.getResult().hasOneUse()) {
+    return false;
+  }
+
+  auto fusedOpName = fc.getName().str() + "." + relu.getName().str() + ".fused";
+  auto *fusedNode = new HabanaFullyConnectedNode(
+      fusedOpName, relu.getResult().getType(), fc.getInput(), fc.getWeights(),
+      fc.getBias(), /*doRelu=*/true);
+  F->addNode(fusedNode);
+
+  relu.getResult().replaceAllUsesOfWith(fusedNode);
+  return true;
+}
+
+/// Fuse any sum of Conv + Nodse into Node -> FusedConvAdd.
 bool fuseConvAdd(Function *F, AddNode &add) {
   // Perform this transformation:
   // Conv --> Add
@@ -1479,8 +1636,10 @@ bool surroundTileWithReshapes(Function *F, TileNode &tile) {
 
 } // namespace
 
-bool HabanaBackend::transformPostLowering(
-    Function *F, const CompilationContext &cctx) const {
+bool HabanaBackend::transformPostLowering(Function *F,
+                                          CompilationContext &cctx) const {
+  LOG_SCOPE(F->getLogContext(), "HabanaBackend::transformPostLowering")
+
   bool changed = false;
   for (auto &node : F->getNodes()) {
     // Separate any Slice nodes into several that only slice in one dimension
@@ -1518,10 +1677,20 @@ bool HabanaBackend::transformPostLowering(
           F->createTranspose("weight_transpose", FC->getWeights(), {1, 0});
       auto *NF = F->addNode(
           new HabanaFullyConnectedNode(FC->getName(), FC->getResult().getType(),
-                                       FC->getInput(), weights, FC->getBias()));
+                                       FC->getInput(), weights, FC->getBias(),
+                                       /*doRelu=*/false));
       FC->getResult().replaceAllUsesOfWith(NF);
       changed = true;
       continue;
+    }
+
+    // Fuse fully connected followed by relu.
+    if (auto *relu = llvm::dyn_cast<ReluNode>(&node)) {
+      if (auto *fc = llvm::dyn_cast<HabanaFullyConnectedNode>(
+              relu->getInput().getNode())) {
+        changed |= fuseFCRelu(F, *fc, *relu);
+        continue;
+      }
     }
 
     // Replace Conv with HabanaConv for better control over code generation.
@@ -1549,7 +1718,47 @@ bool HabanaBackend::transformPostLowering(
       changed = true;
       continue;
     }
+
+    // Sink TransposeNode below QuantizedNode.
+    // Motivations:
+    // 1. This way, TransposeNode has to transpose fewer bytes.
+    // 2. In Habana GC's current version, QuantizeNode will have better
+    // performance when
+    //    FCD is large. In typical case, this sequence is encountered at the
+    //    beginning of vision topologies, where the FCD=W so it is large, and
+    //    after the transpose FCD=C=3 so it is small.
+    if (auto *quant = llvm::dyn_cast<QuantizeNode>(&node)) {
+      auto *transpose = llvm::dyn_cast<TransposeNode>(quant->getInput());
+      if (!transpose) {
+        continue;
+      }
+      auto transposeOutTy = F->getParent()->uniqueTypeWithNewShape(
+          quant->getResult().getType(), transpose->getInput().dims());
+      auto *newQuant = F->createQuantize(quant->getName(),
+                                         transpose->getInput(), transposeOutTy);
+      auto *newTranspose = F->createTranspose(transpose->getName(), newQuant,
+                                              transpose->getShuffle());
+      quant->getResult().replaceAllUsesOfWith(newTranspose);
+      changed = true;
+      continue;
+    }
   }
 
   return changed;
+}
+
+bool HabanaBackend::isVersionBiggerEqualTo(std::string versionToCompare) {
+  const char *habanaVersion = synGetVersion();
+  int myMajor, myMinor, myPath;
+  sscanf(habanaVersion, "%d.%d.%d", &myMajor, &myMinor, &myPath);
+  int toMajor, toMinor, toPath;
+  sscanf(versionToCompare.c_str(), "%d.%d.%d", &toMajor, &toMinor, &toPath);
+  if (toMajor <= myMajor) {
+    if (toMinor <= myMinor) {
+      if (toPath <= myPath) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

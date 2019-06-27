@@ -105,6 +105,8 @@ protected:
   std::unique_ptr<llvm::TargetMachine> TM_;
   /// Information about allocations.
   AllocationsInfo &allocationsInfo_;
+  /// Name of the bundle.
+  std::string bundleName_;
   /// Name of the main entry.
   std::string mainEntryName_;
   /// Instruction number for the module.
@@ -282,6 +284,10 @@ public:
   virtual void performSpecialization();
   /// \returns allocations info.
   virtual AllocationsInfo &getAllocationsInfo() { return allocationsInfo_; }
+  /// \returns the name of the bundle, to be used for filename when saving.
+  llvm::StringRef getBundleName() const;
+  /// Set the name of the bundle.
+  void setBundleName(const std::string &name);
   /// \returns the name of the main entry point.
   /// When JITting, it will be "main". In case of bundling it will be the name
   /// of the bundle.
@@ -302,7 +308,7 @@ public:
   /// The module cannot be used by the LLVMIRGen afterwards.
   std::unique_ptr<llvm::Module> borrowModule() { return std::move(llmodule_); }
   /// \returns current LLVM module.
-  llvm::Module &getModule() { return *llmodule_; }
+  llvm::Module &getModule() const { return *llmodule_; }
   /// \returns the IR function.
   const IRFunction *getIRFunction() { return F_; }
   /// Set output directory for bundles, debug info files, etc.
@@ -322,11 +328,22 @@ public:
   virtual void markArgAsUnspecialized(llvm::Value *val);
   /// \returns bit-width of the target size_t.
   virtual unsigned getTargetSizeTWidth() const;
+  /// \returns the sizeof(size_t) of the actual target-specific size_t type that
+  /// was used to compile libjit into LLVM bitcode.
+  unsigned getLibjitSizeTWidth() const;
   /// \returns true if a call is eligible for specialization.
   virtual bool isEligibleForSpecialization(const llvm::CallInst *call);
   /// \returns true if a global symbol \p GV needs to be preserved in the module
   /// and not interalized during optimizations.
   virtual bool preserveSymbol(const llvm::GlobalValue &GV);
+  /// \returns true if an instruction \p I can be part of a data parallel
+  /// kernel. This gives backends a possibility to provide a custom logic to
+  /// decide on a per-instruction basis what can be part of data parallel
+  /// kernels. Typically an instruction which is isDataParallel() can be part of
+  /// a data parallel kernel. But a backend may decide that a specific
+  /// instruction \p I cannot be part of data-parallel kernels, because there is
+  /// no support for this functionality in this backend yet.
+  virtual bool canBePartOfDataParallelKernel(const glow::Instruction *I) const;
 };
 
 } // namespace glow

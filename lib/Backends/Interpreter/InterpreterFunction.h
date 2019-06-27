@@ -16,11 +16,11 @@
 #ifndef GLOW_BACKENDS_INTERPRETER_INTERPRETERFUNCTION_H
 #define GLOW_BACKENDS_INTERPRETER_INTERPRETERFUNCTION_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/BackendUtils.h"
-#include "glow/Backends/CompiledFunction.h"
-#include "glow/Backends/ExecutionContext.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/BackendUtils.h"
+#include "glow/Backend/CompiledFunction.h"
 #include "glow/Base/Tensor.h"
+#include "glow/ExecutionContext/ExecutionContext.h"
 #include "glow/Quantization/Base/Base.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -57,7 +57,7 @@ public:
   ///@{
   ~InterpreterFunction() override;
 
-  void execute(ExecutionContext *context) override;
+  llvm::Error execute(ExecutionContext *context) override;
 
   /// Collects constants for runtime.
   void collectConstants(const Module *module) override;
@@ -68,9 +68,9 @@ public:
   /// Read trace events out of this func and write them into /p context
   void translateTraceEvents(ExecutionContext *context) const override;
 
-  /// \returns the Kind of Backend used to compile this function.
-  virtual BackendKind getCompileBackendKind() const override {
-    return BackendKind::Interpreter;
+  /// \returns the backend used to compile this function.
+  virtual std::string getCompileBackendName() const override {
+    return "Interpreter";
   }
   ///@}
 };
@@ -93,7 +93,7 @@ public:
 
   ~BoundInterpreterFunction();
 
-  void execute(IRFunction *F, ExecutionContext *context);
+  llvm::Error execute(IRFunction *F, ExecutionContext *context);
 
 private:
   /// \returns a pointer to the tensor that is saved under \p v.
@@ -135,7 +135,7 @@ private:
                                        llvm::ArrayRef<unsigned_t> kernelSizes,
                                        llvm::ArrayRef<unsigned_t> strides,
                                        llvm::ArrayRef<unsigned_t> pads,
-                                       size_t group);
+                                       size_t group, size_t dilation);
 
   template <typename ElemTy = float>
   void fwdConvolutionInstFloatImpl(Value *inV, Value *outV, Value *filterV,
@@ -143,7 +143,7 @@ private:
                                    llvm::ArrayRef<unsigned_t> kernelSizes,
                                    llvm::ArrayRef<unsigned_t> strides,
                                    llvm::ArrayRef<unsigned_t> pads,
-                                   size_t group);
+                                   size_t group, size_t dilation);
 
   template <typename ElemTy, typename AccumulatorTy>
   void fwdConvolution3DInstQuantizedImpl(Value *inV, Value *outV,
@@ -187,6 +187,9 @@ private:
   template <typename ElemTy>
   void fwdBatchOneHotImpl(const glow::BatchOneHotInst *I);
 
+  template <typename ElemTy>
+  void fwdSpaceToDepthInstImpl(const glow::SpaceToDepthInst *I);
+
   template <typename ElemTy> void fwdSigmoidInstFloatImpl(const SigmoidInst *I);
 
   template <typename ElemTy> void fwdTanhInstFloatImpl(const TanhInst *I);
@@ -220,6 +223,9 @@ private:
   void fwdElementLogInstFloatImpl(const ElementLogInst *I);
 
   template <typename ElemTy>
+  void fwdElementExpInstFloatImpl(const ElementExpInst *I);
+
+  template <typename ElemTy>
   void fwdElementSelectInstFloatImpl(const ElementSelectInst *I);
 
   template <typename ElemTy>
@@ -234,6 +240,10 @@ private:
   template <typename ElemTy> void fwdGatherInstImpl(const GatherInst *I);
   template <typename ElemTy>
   void fwdGatherRangesInstImpl(const GatherRangesInst *I);
+
+  void fwdSparseLengthsSumInstI8Impl(const SparseLengthsSumInst *I);
+  template <typename ElemTy>
+  void fwdSparseLengthsSumInstFloatImpl(const SparseLengthsSumInst *I);
 
   void
   fwdSparseLengthsWeightedSumInstI8Impl(const SparseLengthsWeightedSumInst *I);

@@ -19,24 +19,25 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
-static llvm::cl::OptionCategory CPUBackendCat("Glow CPU Backend Options");
-llvm::cl::opt<unsigned>
-    cpuMaxMem("cpu-memory", llvm::cl::desc("CPU DeviceManager maximum memory"),
-              llvm::cl::init(0), llvm::cl::cat(CPUBackendCat));
-
-using namespace glow;
-using namespace glow::runtime;
-
 namespace glow {
 namespace runtime {
-DeviceManager *createCPUDeviceManager(std::unique_ptr<DeviceConfig> config) {
-  if (cpuMaxMem) {
-    return new CPUDeviceManager(std::move(config), cpuMaxMem);
+
+unsigned GlowCPUMemory = 0;
+
+static llvm::cl::opt<unsigned, /* ExternalStorage */ true> GlowCPUMemoryOpt(
+    "cpu-memory",
+    llvm::cl::desc("CPU DeviceManager maximum memory in kilobytes."),
+    llvm::cl::location(GlowCPUMemory));
+
+DeviceManager *createCPUDeviceManager(const DeviceConfig &config) {
+  if (GlowCPUMemory) {
+    // Convert command line GlowCPUMemory to bytes from kilobytes.
+    auto configNew = config;
+    configNew.setDeviceMemory(uint64_t{GlowCPUMemory} * 1024);
+    return new CPUDeviceManager(configNew);
   }
-  return new CPUDeviceManager(std::move(config));
+  return new CPUDeviceManager(config);
 }
-} // namespace runtime
-} // namespace glow
 
 uint64_t CPUDeviceManager::getMaximumMemory() const { return maxMemoryBytes_; }
 
@@ -65,7 +66,7 @@ void CPUDeviceManager::addNetworkImpl(const Module *module,
       return;
     }
 
-    if (func.second->getCompileBackendKind() != BackendKind::CPU) {
+    if (func.second->getCompileBackendName() != "CPU") {
       readyCB(
           module,
           MAKE_ERR(
@@ -100,34 +101,27 @@ void CPUDeviceManager::addNetworkImpl(const Module *module,
 
 void CPUDeviceManager::evictNetworkImpl(std::string functionName,
                                         EvictFunctionCBTy evictCB) {
-  llvm::Error err = llvm::Error::success();
-
   if (functions_.erase(functionName)) {
     usedMemoryBytes_ -= functionCost_; // TODO: static moduleSize
   } else {
-    err =
-        MAKE_ERR(GlowErr::ErrorCode::RUNTIME_NET_NOT_FOUND,
-                 llvm::formatv("Could not find function with name {0} to evict",
-                               functionName)
-                     .str());
+    evictCB(functionName,
+            MAKE_ERR(GlowErr::ErrorCode::RUNTIME_NET_NOT_FOUND,
+                     strFormat("Could not find function with name %s to evict",
+                               functionName.c_str())));
+    return;
   }
-
-  if (evictCB) {
-    evictCB(functionName, std::move(err));
-  } else {
-    llvm::errs() << llvm::toString(std::move(err));
-  }
+  evictCB(functionName, llvm::Error::success());
 }
 
 void CPUDeviceManager::runFunctionImpl(
     RunIdentifierTy id, std::string function,
     std::unique_ptr<ExecutionContext> context, ResultCBTy resultCB) {
-  std::string eventName = "run_" + function + "_" + std::to_string(id);
-  TRACE_EVENT_BEGIN(context->getTraceContext(), eventName);
+  TRACE_EVENT_SCOPE_NAMED(context->getTraceContext(), TraceLevel::RUNTIME,
+                          "DeviceManager::run", dmRun);
   auto funcIt = functions_.find(function);
   if (funcIt == functions_.end()) {
-    context->logTraceEvent(eventName, TraceEvent::EndType,
-                           {{"reason", "function not found"}});
+    dmRun.addArg("reason", "function not found");
+    TRACE_EVENT_SCOPE_END_NAMED(dmRun);
     resultCB(id,
              MAKE_ERR(GlowErr::ErrorCode::RUNTIME_NET_NOT_FOUND,
                       llvm::formatv("Function {0} not found", function).str()),
@@ -138,11 +132,13 @@ void CPUDeviceManager::runFunctionImpl(
   CompiledFunction *func = funcIt->second;
 
   // Run that function.
-  func->execute(context.get());
+  auto executeErr = func->execute(context.get());
 
   // End the TraceEvent early to avoid time in the CB.
-  TRACE_EVENT_END(context->getTraceContext(), eventName)
+  TRACE_EVENT_SCOPE_END_NAMED(dmRun);
 
   // Fire the resultCB.
-  resultCB(id, llvm::Error::success(), std::move(context));
+  resultCB(id, std::move(executeErr), std::move(context));
 }
+} // namespace runtime
+} // namespace glow

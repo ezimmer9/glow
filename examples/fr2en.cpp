@@ -15,11 +15,14 @@
  */
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Graph/Graph.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Quantization/Quantization.h"
 #include "glow/Quantization/Serialization.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Timer.h"
+
+#include <glog/logging.h>
 
 #include <algorithm>
 #include <fstream>
@@ -58,13 +61,10 @@ llvm::cl::opt<bool>
                            "the file directly."),
             llvm::cl::Optional, llvm::cl::cat(fr2enCat));
 
-llvm::cl::opt<BackendKind> ExecutionBackend(
-    llvm::cl::desc("Backend to use:"), llvm::cl::Optional,
-    llvm::cl::values(clEnumValN(BackendKind::Interpreter, "interpreter",
-                                "Use interpreter"),
-                     clEnumValN(BackendKind::CPU, "cpu", "Use CPU"),
-                     clEnumValN(BackendKind::OpenCL, "opencl", "Use OpenCL")),
-    llvm::cl::init(BackendKind::Interpreter), llvm::cl::cat(fr2enCat));
+llvm::cl::opt<std::string> ExecutionBackend(
+    "backend",
+    llvm::cl::desc("Backend to use, e.g., Interpreter, CPU, OpenCL:"),
+    llvm::cl::Optional, llvm::cl::init("Interpreter"), llvm::cl::cat(fr2enCat));
 
 /// Quantization options.
 llvm::cl::OptionCategory quantizationCat("Quantization Options");
@@ -113,9 +113,10 @@ struct Vocabulary {
 void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
   std::ifstream file(filename.str(), std::ios::binary);
   if (!file.read(result.getUnsafePtr(), result.size() * sizeof(float))) {
-    std::cout << "Error reading file: " << filename.str() << '\n'
-              << "Need to be downloaded by calling:\n"
-              << "python ../glow/utils/download_test_db.py -d fr2en\n";
+    std::cout
+        << "Error reading file: " << filename.str() << '\n'
+        << "Need to be downloaded by calling:\n"
+        << "python ../glow/utils/download_datasets_and_models.py -d fr2en\n";
     exit(1);
   }
 }
@@ -146,45 +147,24 @@ struct Model {
   void dumpGraphDAG(const char *filename) { F_->dumpDAG(filename); }
 
   void compile() {
+    CompilationContext cctx{&bindings, &loweredMap_};
+    PrecisionConfiguration &precConfig = cctx.precisionConfig;
+
+    ::glow::convertPlaceholdersToConstants(F_, bindings,
+                                           {input_, seqLength_, output_});
+
     if (!dumpProfileFileOpt.empty()) {
-      // Perform the high-level optimizations before instrumenting the graph.
-      // This optimization phase will remove stuff like repetitive transpose
-      // operations perform CSE, etc.
-      ::optimize(F_, glow::CompilationMode::Infer);
-
-      // Lower everything for profile and log lowered info in loweredMap_. Used
-      // later when creating quantization infos.
-      ::lower(F_, &loweredMap_);
-
-      // Instrument the graph to capture profiles for nodes' outputs.
-      glow::profileQuantization(bindings, F_);
+      precConfig.quantMode = QuantizationMode::Profile;
     }
 
     // Load the quantization profile and transform the graph.
     if (!loadProfileFileOpt.empty()) {
-      // The profiled graph was optimized before it was instrumentated. In this
-      // part of the code we repeat the same transformation in order to create
-      // the same graph structure.
-      glow::optimize(F_, CompilationMode::Infer);
-
-      // Lower however the backend prefers.
-      ::lower(F_, &loweredMap_, EE_.getBackend());
-
-      quantization::QuantizationConfiguration quantConfig{
-          deserializeFromYaml(loadProfileFileOpt)};
-
-      // Quantize the graph based on the captured profile.
-      quantization::quantizeFunction(F_, quantConfig, *EE_.getBackend(),
-                                     loweredMap_);
+      precConfig.quantMode = QuantizationMode::Quantize;
+      precConfig.quantConfig.infos = deserializeFromYaml(loadProfileFileOpt);
+      precConfig.quantConfig.assertAllNodesQuantized = true;
     }
 
-    // Do not create constants if we're profiling; the newly allocate histogram
-    // vars will erroneously become constants.
-    if (dumpProfileFileOpt.empty()) {
-      ::glow::convertPlaceholdersToConstants(F_, bindings,
-                                             {input_, seqLength_, output_});
-    }
-    EE_.compile(CompilationMode::Infer, F_);
+    EE_.compile(F_, cctx);
   }
 
 private:
@@ -385,11 +365,11 @@ void Model::translate(const std::vector<std::string> &batch) {
       words.push_back(word);
     words.push_back("EOS");
 
-    GLOW_ASSERT(words.size() <= MAX_LENGTH && "sentence is too long.");
+    CHECK_LE(words.size(), MAX_LENGTH) << "sentence is too long.";
 
     for (size_t i = 0; i < words.size(); i++) {
       auto iter = fr_.word2index_.find(words[i]);
-      GLOW_ASSERT(iter != fr_.word2index_.end() && "Unknown word.");
+      CHECK(iter != fr_.word2index_.end()) << "Unknown word: " << words[i];
       input.getHandle<int64_t>().at({j, i}) = iter->second;
     }
     seqLength.getHandle<int64_t>().at({j}) =

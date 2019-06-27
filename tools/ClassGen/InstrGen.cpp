@@ -85,9 +85,26 @@ int main(int argc, char **argv) {
       .addMember(MemberType::VectorUnsigned, "Strides")
       .addMember(MemberType::VectorUnsigned, "Pads")
       .addMember(MemberType::Unsigned, "Group")
+      .addMember(MemberType::Unsigned, "Dilation")
       .autoIRGen()
       .autoVerify(VerifyKind::SameElementType, {"Dest", "Src", "Filter"})
       .addGradientInstr({"Src", "Filter"}, {"Dest", "Src", "Filter", "Bias"});
+
+  BB.newInstr("ChannelwiseQuantizedConvolution")
+      .addOperand("Dest", OperandKind::Out)
+      .addOperand("Src", OperandKind::In)
+      .addOperand("Filter", OperandKind::In)
+      .addOperand("Bias", OperandKind::In)
+      .addOperand("Scales", OperandKind::In)
+      .addOperand("Offsets", OperandKind::In)
+      .addMember(MemberType::VectorUnsigned, "Kernels")
+      .addMember(MemberType::VectorUnsigned, "Strides")
+      .addMember(MemberType::VectorUnsigned, "Pads")
+      .addMember(MemberType::Unsigned, "Group")
+      .addMember(MemberType::Boolean, "Groupwise")
+      .autoIRGen()
+      .autoVerify(VerifyKind::SameElementType,
+                  {"Dest", "Src", "Filter", "ElemKind::Int8QTy"});
 
   BB.newInstr("Convolution3D")
       .addOperand("Dest", OperandKind::Out)
@@ -224,6 +241,18 @@ int main(int argc, char **argv) {
       .autoVerify(VerifyKind::SameElementType,
                   {"Lengths", "ElemKind::Int32ITy"});
 
+  BB.newInstr("SparseLengthsSum")
+      .addOperand("Dest", OperandKind::Out)
+      .addOperand("Data", OperandKind::In)
+      .addOperand("Indices", OperandKind::In)
+      .addOperand("Lengths", OperandKind::In)
+      .autoIRGen()
+      .autoVerify(VerifyKind::SameElementType, {"Dest", "Data"})
+      .autoVerify(VerifyKind::SameElementType,
+                  {"Indices", "ElemKind::Int64ITy"})
+      .autoVerify(VerifyKind::SameElementType,
+                  {"Lengths", "ElemKind::Int32ITy"});
+
   BB.newInstr("SparseLengthsWeightedSum")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Data", OperandKind::In)
@@ -237,7 +266,8 @@ int main(int argc, char **argv) {
       .autoVerify(VerifyKind::SameElementType,
                   {"Lengths", "ElemKind::Int32ITy"})
       .autoVerify(VerifyKind::SameShape, {"Weights", "Indices"})
-      .addGradientInstr({"Weights", "Indices", "Lengths"}, {"Dest", "Data"});
+      .addGradientInstr({"Data", "Weights", "Indices", "Lengths"},
+                        {"Dest", "Data", "Weights"});
 
   BB.newInstr("RowwiseQuantizedSparseLengthsWeightedSum")
       .addOperand("Dest", OperandKind::Out)
@@ -277,6 +307,14 @@ int main(int argc, char **argv) {
       .autoVerify(VerifyKind::SameShape, {"Weights", "Indices"});
 
   BB.newInstr("LengthsToRanges")
+      .addOperand("Dest", OperandKind::Out)
+      .addOperand("Lengths", OperandKind::In)
+      .autoIRGen()
+      .autoVerify(VerifyKind::SameElementType, {"Dest", "ElemKind::Int32ITy"})
+      .autoVerify(VerifyKind::SameElementType,
+                  {"Lengths", "ElemKind::Int32ITy"});
+
+  BB.newInstr("LengthsRangeFill")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Lengths", OperandKind::In)
       .autoIRGen()
@@ -418,6 +456,17 @@ int main(int argc, char **argv) {
       .autoVerify(VerifyKind::SameType, {"Dest", "Src"})
       .autoIRGen("Log");
 
+  BB.newInstr("ElementExp")
+      .addOperand("Dest", OperandKind::Out)
+      .addOperand("Src", OperandKind::In)
+      .inplaceOperand({
+          "Dest",
+          "Src",
+      })
+      .dataParallel()
+      .autoVerify(VerifyKind::SameType, {"Dest", "Src"})
+      .autoIRGen("Exp");
+
   BB.newInstr("ElementSelect")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Cond", OperandKind::In)
@@ -499,7 +548,6 @@ int main(int argc, char **argv) {
   BB.newInstr("ExtractTensor")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Src", OperandKind::In)
-      .autoVerify(VerifyKind::SameElementType, {"Dest", "Src"})
       .addMember(MemberType::VectorSizeT, "Offsets");
 
   BB.newInstr("Gather")
@@ -534,6 +582,13 @@ int main(int argc, char **argv) {
       .autoVerify(VerifyKind::SameElementType, {"Values", "Data", "Dest"})
       .autoVerify(VerifyKind::SameElementType,
                   {"Lengths", "ElemKind::Int32ITy"})
+      .autoIRGen();
+
+  BB.newInstr("SpaceToDepth")
+      .addOperand("Dest", OperandKind::Out)
+      .addOperand("Src", OperandKind::In)
+      .addMember(MemberType::Unsigned, "BlockSize")
+      .autoVerify(VerifyKind::SameElementType, {"Dest", "Src"})
       .autoIRGen();
 
   //===--------------------------------------------------------------------===//
@@ -624,7 +679,6 @@ int main(int argc, char **argv) {
   //===--------------------------------------------------------------------===//
 
 #include "Backends/CPU/CPUSpecificInstrs.h"
-#include "Backends/Habana/HabanaSpecificInstrs.h"
 #include "Backends/OpenCL/OpenCLSpecificInstrs.h"
   // Add here external backend specific instructions headers.
   // Example:

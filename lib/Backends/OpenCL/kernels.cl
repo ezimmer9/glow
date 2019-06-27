@@ -200,6 +200,14 @@ __kernel void dequantizeW(__global void *mem, cl_uint32_t dest, cl_uint32_t src,
 /// \p name the name of the kernel
 /// \p type the type of the tensor elements and of the return value
 /// \p body the operation to be performed
+
+/// The K16 kernel uses 8-element vector primitives on two contiguous 8-element
+/// blocks of data (blocks i and i+1) to produce a 16-element vectorized
+/// kernel. Consequently, the global ID needs to be multiplied by 2 so that
+/// each kernel invocation will load/store blocks that are not loaded/stored by
+/// other kernels. If this is not done, the kernel with global ID 0 will
+/// load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+/// blocks 1 and 2, etc.
 #define DEFINE_OPENCL_TERNARY_DATA_PARALLEL_KERNEL(name, type, body)           \
   __kernel void name##K##16(__global type * dest, __global type * cond,        \
                             __global type * lhs, __global type * rhs) {        \
@@ -260,6 +268,14 @@ __kernel void dequantizeW(__global void *mem, cl_uint32_t dest, cl_uint32_t src,
 /// \p name the name of the kernel
 /// \p type the type of the tensor elements and of the return value
 /// \p body the operation to be performed
+
+/// The K16 kernel uses 8-element vector primitives on two contiguous 8-element
+/// blocks of data (blocks i and i+1) to produce a 16-element vectorized
+/// kernel. Consequently, the global ID needs to be multiplied by 2 so that
+/// each kernel invocation will load/store blocks that are not loaded/stored by
+/// other kernels. If this is not done, the kernel with global ID 0 will
+/// load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+/// blocks 1 and 2, etc.
 #define DEFINE_OPENCL_BINARY_DATA_PARALLEL_KERNEL(name, type, body)            \
   __kernel void name##K##16(__global type * dest, __global type * lhs,         \
                             __global type * rhs) {                             \
@@ -372,6 +388,14 @@ __kernel void dequantizeW(__global void *mem, cl_uint32_t dest, cl_uint32_t src,
 /// \p name the name of the kernel
 /// \p type the type of the tensor elements and of the return value
 /// \p body the operation to be performed
+
+/// The K16 kernel uses 8-element vector primitives on two contiguous 8-element
+/// blocks of data (blocks i and i+1) to produce a 16-element vectorized
+/// kernel. Consequently, the global ID needs to be multiplied by 2 so that
+/// each kernel invocation will load/store blocks that are not loaded/stored by
+/// other kernels. If this is not done, the kernel with global ID 0 will
+/// load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+/// blocks 1 and 2, etc.
 #define DEFINE_OPENCL_UNARY_DATA_PARALLEL_KERNEL(name, type, body)             \
   __kernel void name##K##16(__global type * dest, __global type * src) {       \
     typedef float8 vtype;                                                      \
@@ -419,6 +443,14 @@ __kernel void dequantizeW(__global void *mem, cl_uint32_t dest, cl_uint32_t src,
 /// \p name the name of the kernel
 /// \p type the type of the tensor elements and of the return value
 /// \p body the operation to be performed
+
+/// The K16 kernel uses 8-element vector primitives on two contiguous 8-element
+/// blocks of data (blocks i and i+1) to produce a 16-element vectorized
+/// kernel. Consequently, the global ID needs to be multiplied by 2 so that
+/// each kernel invocation will load/store blocks that are not loaded/stored by
+/// other kernels. If this is not done, the kernel with global ID 0 will
+/// load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+/// blocks 1 and 2, etc.
 #define DEFINE_OPENCL_UNARY_DATA_PARALLEL_KERNEL_WITH_IMM_OPERAND(name, type,  \
                                                                   body)        \
   __kernel void name##K##16(__global type * dest, type val) {                  \
@@ -487,6 +519,48 @@ DEFINE_OPENCL_UNARY_DATA_PARALLEL_KERNEL_WITH_IMM_OPERAND(splat_i8, char, SRC)
 #undef DEFINE_OPENCL_BINARY_DATA_PARALLEL_KERNEL_QUANTIZED_M
 #undef DEFINE_OPENCL_UNARY_DATA_PARALLEL_KERNEL
 
+__kernel void elementselectK16(__global float *dest, __global cl_int8_t *cond,
+                               __global float *lhs, __global float *rhs) {
+  // This kernel uses 8-element vector primitives on two contiguous 8-element
+  // blocks of data (blocks i and i+1) to produce a 16-element vectorized
+  // kernel. Consequently, the global ID needs to be multiplied by 2 so that
+  // each kernel invocation will load/store blocks that are not loaded/stored by
+  // other kernels. If this is not done, the kernel with global ID 0 will
+  // load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+  // blocks 1 and 2, etc.
+  size_t i = 2 * get_global_id(0);
+  float8 zeroVec = (float8)(0, 0, 0, 0, 0, 0, 0, 0);
+
+  vstore8(select(vload8(i, rhs), vload8(i, lhs),
+                 isnotequal(convert_float8(vload8(i, cond)), zeroVec)),
+          i, dest);
+  vstore8(select(vload8(i + 1, rhs), vload8(i + 1, lhs),
+                 isnotequal(convert_float8(vload8(i + 1, cond)), zeroVec)),
+          i + 1, dest);
+}
+
+__kernel void elementselectW16(__global void *mem, cl_uint32_t dest,
+                               cl_uint32_t cond, cl_uint32_t lhs,
+                               cl_uint32_t rhs) {
+  elementselectK16(&mem[dest], &mem[cond], &mem[lhs], &mem[rhs]);
+}
+
+__kernel void elementselectK8(__global float *dest, __global cl_int8_t *cond,
+                              __global float *lhs, __global float *rhs) {
+  size_t i = get_global_id(0);
+  float8 zeroVec = (float8)(0, 0, 0, 0, 0, 0, 0, 0);
+
+  vstore8(select(vload8(i, rhs), vload8(i, lhs),
+                 isnotequal(convert_float8(vload8(i, cond)), zeroVec)),
+          i, dest);
+}
+
+__kernel void elementselectW8(__global void *mem, cl_uint32_t dest,
+                              cl_uint32_t cond, cl_uint32_t lhs,
+                              cl_uint32_t rhs) {
+  elementselectK8(&mem[dest], &mem[cond], &mem[lhs], &mem[rhs]);
+}
+
 __kernel void elementselectK(__global float *dest, __global cl_int8_t *cond,
                              __global float *lhs, __global float *rhs) {
   size_t i = get_global_id(0);
@@ -504,7 +578,14 @@ __kernel void elementselectW(__global void *mem, cl_uint32_t dest,
 
 __kernel void elementcmplteK16(__global cl_int8_t *dest, __global float *LHS,
                                __global float *RHS) {
-  size_t i = get_global_id(0);
+  // This kernel uses 8-element vector primitives on two contiguous 8-element
+  // blocks of data (blocks i and i+1) to produce a 16-element vectorized
+  // kernel. Consequently, the global ID needs to be multiplied by 2 so that
+  // each kernel invocation will load/store blocks that are not loaded/stored by
+  // other kernels. If this is not done, the kernel with global ID 0 will
+  // load/store blocks 0 and 1, the kernel with global ID 1 will load/store on
+  // blocks 1 and 2, etc.
+  size_t i = 2 * get_global_id(0);
   vstore8(convert_char8(islessequal(vload8(i, LHS), vload8(i, RHS))), i, dest);
   vstore8(convert_char8(islessequal(vload8(i + 1, LHS), vload8(i + 1, RHS))),
           i + 1, dest);
@@ -538,18 +619,52 @@ __kernel void elementcmplteW(__global void *mem, cl_uint32_t dest,
 }
 
 __kernel void batchedreduceaddK(__global float *dest, __global float *batch,
-                                cl_uint32_t numSlice, cl_uint32_t sliceSize) {
-  size_t s = get_global_id(0);
-  dest[s] = 0;
-  for (size_t n = 0; n < numSlice; n++) {
-    dest[s] += batch[n * sliceSize + s];
+                                __global cl_host_size_t *batchSliceSizes,
+                                __global cl_host_size_t *destSliceSize,
+                                cl_uint32_t numSlices,
+                                cl_uint32_t axisSliceSize) {
+  size_t workDim = get_work_dim();
+
+  // This is the component of the offset into batch that depends only on the
+  // kernel's global IDs.
+  size_t batchOffset = 0;
+
+  // This is the offset into dest. It depends only on the kernel's global IDs.
+  size_t destOffset = 0;
+
+  // Compute batchOffset and destOffset by multiplying the kernel's global IDs
+  // with the corresponding batch and dest slice sizes.
+  //
+  // For example, suppose the input shape is {3, 4, 5} and the reduce axis is 1.
+  // Then, the output shape is {3, 5}. In this case, batchSliceSizes is {4 * 5 =
+  // 20, 1} (axis 1 is missing) and destSliceSizes is {5, 1}. The global
+  // workspace this kernel was launched with has dimensions {3, 5} (one for each
+  // output element). A kernel with IDs {i, j} will add together elements
+  // {i, 0..4, j} and store the result in element {i, j}, so (i * 20 + j * 1)
+  // will be a component of every offset it uses to access batch, and (i * 5 + j
+  // * 1) will be the offset it uses to access dest. This is precisely what
+  // batchOffset and destOffset are. The loop below precomputes these offsets
+  // before the actual reduce.
+  for (size_t i = 0; i < workDim; ++i) {
+    size_t id = get_global_id(i);
+    batchOffset += id * batchSliceSizes[i];
+    destOffset += id * destSliceSize[i];
+  }
+
+  // Perform the actual reduce. Add the slice number * the slice size at the
+  // axis index to batchOffset to get the elements to add together.
+  dest[destOffset] = 0;
+  for (size_t n = 0; n < numSlices; n++) {
+    dest[destOffset] += batch[n * axisSliceSize + batchOffset];
   }
 }
 
-__kernel void batchedreduceaddW(__global void *mem, cl_uint32_t dest,
-                                cl_uint32_t batch, cl_uint32_t numSlice,
-                                cl_uint32_t sliceSize) {
-  batchedreduceaddK(&mem[dest], &mem[batch], numSlice, sliceSize);
+__kernel void
+batchedreduceaddW(__global void *mem, cl_uint32_t dest, cl_uint32_t batch,
+                  __global void *batchSliceSizes, __global void *destSliceSizes,
+                  cl_uint32_t numSlices, cl_uint32_t axisSliceSize) {
+  batchedreduceaddK(&mem[dest], &mem[batch], batchSliceSizes, destSliceSizes,
+                    numSlices, axisSliceSize);
 }
 
 __kernel void batchedaddK(__global float *dest, __global float *batch,
@@ -1502,7 +1617,7 @@ __kernel void sparselengthsweightedsumK(__global float *dest,
                                         __global float *weights,
                                         __global cl_uint64_t *indices,
                                         __global cl_int32_t *lengths,
-                                        cl_uint32_t dataSliceSize) {
+                                        cl_uint32_t sliceSize) {
   // Get the global ID. This corresponds to the segment that this kernel will
   // compute, and therefore also the index into the output buffer at which this
   // kernel will write its output.
@@ -1526,9 +1641,8 @@ __kernel void sparselengthsweightedsumK(__global float *dest,
 
     // Read an entire slice of data at index dataIdx, multiply it by the weight
     // and store it into dest at index idx (same as the segment number).
-    for (cl_uint64_t k = 0; k < dataSliceSize; ++k) {
-      dest[idx * dataSliceSize + k] +=
-          weight * data[dataIdx * dataSliceSize + k];
+    for (cl_uint32_t k = 0; k < sliceSize; ++k) {
+      dest[idx * sliceSize + k] += weight * data[dataIdx * sliceSize + k];
     }
 
     // Increment the index.
@@ -1543,6 +1657,52 @@ __kernel void sparselengthsweightedsumW(__global void *mem, cl_uint32_t dest,
                                         cl_uint32_t dataSliceSize) {
   sparselengthsweightedsumK(&mem[dest], &mem[data], &mem[weights],
                             &mem[indices], &mem[lengths], dataSliceSize);
+}
+
+__kernel void sparselengthsweightedsumgradK(
+    __global float *destGrad, __global float *dataGrad,
+    __global float *weightsGrad, __global float *data, __global float *weights,
+    __global cl_uint64_t *indices, __global cl_int32_t *lengths,
+    cl_uint32_t segments, cl_uint32_t sliceSize) {
+
+  // For each segment:
+  for (cl_uint32_t i = 0, curIdx = 0; i < segments; ++i) {
+    // For each index in the segment:
+    for (cl_int32_t j = 0; j < lengths[i]; ++j, ++curIdx) {
+      float weightGrad = 0.0f;
+      // Get the weight for the current index.
+      float weight = weights[curIdx];
+      // Get the index into dataGrad corresponding to the current index.
+      cl_uint64_t dataGradIdx = indices[curIdx];
+
+      // Read an entire slice of destGrad at index i (same as the segment
+      // number), multiply it by the weight (that helped produce the
+      // corresponding slice of dest during the forward pass) and store it into
+      // dataGrad at index dataGradIdx. In the same loop, accumulate into each
+      // weight gradient the reduced sum of the elementwise product of the
+      // result slice that the corresponding weight produced and the input
+      // slice that the weight was multiplied with.
+      for (cl_uint32_t k = 0; k < sliceSize; ++k) {
+        dataGrad[dataGradIdx * sliceSize + k] +=
+            weight * destGrad[i * sliceSize + k];
+        weightGrad +=
+            destGrad[i * sliceSize + k] * data[dataGradIdx * sliceSize + k];
+      }
+
+      weightsGrad[curIdx] = weightGrad;
+    }
+  }
+}
+
+__kernel void
+sparselengthsweightedsumgradW(__global void *mem, cl_uint32_t data,
+                              cl_uint32_t weights, cl_uint32_t indices,
+                              cl_uint32_t lengths, cl_uint32_t destGrad,
+                              cl_uint32_t dataGrad, cl_uint32_t weightsGrad,
+                              cl_uint32_t segments, cl_uint32_t sliceSize) {
+  sparselengthsweightedsumgradK(
+      &mem[destGrad], &mem[dataGrad], &mem[weightsGrad], &mem[data],
+      &mem[weights], &mem[indices], &mem[lengths], segments, sliceSize);
 }
 
 /// An empty kernel used as a checkpoint for TraceEvents.

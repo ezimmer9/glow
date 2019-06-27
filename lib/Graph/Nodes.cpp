@@ -108,18 +108,20 @@ static bool verifyConvolution(NodeValue src, NodeValue dest, NodeValue filter,
                               NodeValue bias,
                               llvm::ArrayRef<unsigned_t> kernels,
                               llvm::ArrayRef<unsigned_t> strides,
-                              llvm::ArrayRef<unsigned_t> pads,
-                              unsigned_t group) {
+                              llvm::ArrayRef<unsigned_t> pads, unsigned_t group,
+                              unsigned_t dilation, bool checkBiasType = true) {
   const Node *parent = dest.getNode();
   bool isValid = checkType(src, dest.getElementType(), parent);
   isValid &= checkType(src, filter.getElementType(), parent);
-  // Non quantization type check.
-  if (src.getElementType() == ElemKind::FloatTy) {
-    isValid &= checkType(bias, ElemKind::FloatTy, parent);
-  }
-  // Quantization type check.
-  if (src.getElementType() == ElemKind::Int8QTy) {
-    isValid &= checkType(bias, ElemKind::Int32QTy, parent);
+  if (checkBiasType) {
+    // Non quantization type check.
+    if (src.getElementType() == ElemKind::FloatTy) {
+      isValid &= checkType(bias, ElemKind::FloatTy, parent);
+    }
+    // Quantization type check.
+    if (src.getElementType() == ElemKind::Int8QTy) {
+      isValid &= checkType(bias, ElemKind::Int32QTy, parent);
+    }
   }
   ShapeNHWC idim(src.getType()->dims());
   ShapeNHWC odim(dest.getType()->dims());
@@ -134,8 +136,8 @@ static bool verifyConvolution(NodeValue src, NodeValue dest, NodeValue filter,
   isValid &= expectCompareTrue("channels number must be divisible by groups",
                                idim.c % group, size_t(0), parent);
 
-  auto outSz =
-      calculateConvPoolOutputDims(idim.h, idim.w, kernels, strides, pads);
+  auto outSz = calculateConvPoolOutputDims(idim.h, idim.w, kernels, strides,
+                                           pads, dilation);
   isValid &=
       expectCompareTrue("Invalid output dimension N", odim.n, idim.n, parent);
   isValid &= expectCompareTrue("Invalid output dimension H", odim.h,
@@ -374,6 +376,20 @@ static bool verifyRegression(NodeValue src, NodeValue dest,
          checkSameType(dest, expected, dest.getNode());
 }
 
+static bool verifySparseLengthsSum(NodeValue dest, NodeValue data,
+                                   NodeValue indices, NodeValue lengths) {
+  bool isValid = checkType(dest, data.getElementType(), dest.getNode());
+  isValid &= checkType(indices, ElemKind::Int64ITy, dest.getNode());
+  isValid &= checkType(lengths, ElemKind::Int32ITy, dest.getNode());
+  isValid &=
+      expectCompareTrue("Indices must be a 1D vector", indices.dims().size(),
+                        size_t(1), dest.getNode());
+  isValid &=
+      expectCompareTrue("Lengths must be a 1D vector", lengths.dims().size(),
+                        size_t(1), dest.getNode());
+  return isValid;
+}
+
 static bool verifySparseLengthsWeightedSum(NodeValue dest, NodeValue data,
                                            NodeValue weights, NodeValue indices,
                                            NodeValue lengths) {
@@ -406,7 +422,42 @@ bool PadNode::verify() const {
 
 bool ConvolutionNode::verify() const {
   return verifyConvolution(getInput(), getResult(), getFilter(), getBias(),
-                           Kernels_, Strides_, Pads_, Group_);
+                           Kernels_, Strides_, Pads_, Group_, Dilation_);
+}
+
+bool ChannelwiseQuantizedConvolutionNode::verify() const {
+  bool isValid = expectCompareTrue("Only groupwise quantization is supported.",
+                                   getGroupwise(), true, this);
+
+  if (!isValid) {
+    return false;
+  }
+
+  isValid = verifyConvolution(getInput(), getResult(), getFilter(), getBias(),
+                              Kernels_, Strides_, Pads_, Group_,
+                              /* dilation */ 1, /* checkBiasType */ false);
+
+  isValid &= checkType(getBias(), ElemKind::FloatTy, this);
+  isValid &= checkType(getInput(), ElemKind::Int8QTy, this);
+
+  // check qparam types
+  isValid &= checkType(getOffsets(), ElemKind::Int32ITy, this);
+  isValid &= checkType(getScales(), ElemKind::FloatTy, this);
+
+  // check qparam dimensions
+  isValid &= expectCompareTrue("Offsets must be a 1D vector",
+                               getOffsets().dims().size(), size_t(1), this);
+  isValid &= expectCompareTrue("Scales must be a 1D vector",
+                               getScales().dims().size(), size_t(1), this);
+
+  // check qparam sizes
+  isValid &=
+      expectCompareTrue("There must be one filter offset qparam per group",
+                        getOffsets().dims()[0], size_t(getGroup()), this);
+  isValid &=
+      expectCompareTrue("There must be one filter scale qparam per group",
+                        getScales().dims()[0], size_t(getGroup()), this);
+  return isValid;
 }
 
 bool Convolution3DNode::verify() const {
@@ -444,7 +495,7 @@ bool ConvolutionGradNode::verify() const {
   isValid &= verifyConvolution(
       getGradOfInputNamedInput(), getGradOfOriginalOutputNamedResult(),
       getGradOfInputNamedFilter(), getGradOfInputNamedBias(), Kernels_,
-      Strides_, Pads_, Group_);
+      Strides_, Pads_, Group_, Dilation_);
   return isValid;
 }
 
@@ -527,6 +578,38 @@ bool MatMulNode::verify() const {
   return isValid;
 }
 
+bool BatchMatMulNode::verify() const {
+  auto LHS = getLHS();
+  auto RHS = getRHS();
+  auto dest = getResult();
+
+  bool isValid = expectCompareTrue("LHS input must be 3 dimensional.",
+                                   LHS.dims().size(), size_t(3), this);
+  isValid &= expectCompareTrue("RHS input must be 3 dimensional.",
+                               RHS.dims().size(), size_t(3), this);
+  isValid &= expectCompareTrue("Result must be 3 dimensional.",
+                               dest.dims().size(), size_t(3), this);
+  isValid &= expectCompareTrue("LHS and RHS inputs must have same batch size.",
+                               LHS.dims()[0], RHS.dims()[0], this);
+  isValid &= expectCompareTrue("Result must have same batch size as inputs.",
+                               LHS.dims()[0], dest.dims()[0], this);
+
+  const size_t numBatches = LHS.dims()[0];
+  const size_t N = LHS.dims()[1];
+  const size_t M = LHS.dims()[2];
+  const size_t P = RHS.dims()[2];
+  isValid &= expectCompareTrue("Inputs have invalid dimensions.", RHS.dims()[1],
+                               M, this);
+  isValid &= expectCompareTrue("Result has invalid dimensions given inputs.",
+                               dest.dims(), {numBatches, N, P}, this);
+
+  auto elemType = dest.getType()->getElementType();
+  isValid &= checkType(LHS, elemType, this);
+  isValid &= checkType(RHS, elemType, this);
+
+  return isValid;
+}
+
 bool SigmoidNode::verify() const {
   return verifySigmoid(getInput(), getResult());
 }
@@ -550,6 +633,18 @@ bool TanhGradNode::verify() const {
       getOriginalOutputForResult(), getGradOfOriginalOutputNamedResult(), this);
   isValid &= verifyTanh(getGradOfInputNamedInput(),
                         getGradOfOriginalOutputNamedResult());
+  return isValid;
+}
+
+bool ExpNode::verify() const {
+  const Node *parent = getResult().getNode();
+  bool isValid =
+      checkSameIsQuantized(getInput().getType(), getResult().getType(), parent);
+  if (getInput().getType()->isQuantizedType()) {
+    return false;
+  }
+  isValid &= checkSameType(getInput(), getResult(), parent);
+  isValid &= checkSameShape(getInput(), getResult(), parent);
   return isValid;
 }
 
@@ -851,6 +946,11 @@ bool BatchedReduceMeanNode::verify() const {
   return isValid;
 }
 
+bool SparseLengthsSumNode::verify() const {
+  return verifySparseLengthsSum(getResult(), getData(), getIndices(),
+                                getLengths());
+}
+
 bool SparseLengthsWeightedSumNode::verify() const {
   return verifySparseLengthsWeightedSum(getResult(), getData(), getWeights(),
                                         getIndices(), getLengths());
@@ -902,36 +1002,54 @@ bool RowwiseQuantizedSparseLengthsWeightedSumNode::verify() const {
   return isValid;
 }
 
-bool FusedRowwiseQuantizedSparseLengthsWeightedSumNode::verify() const {
-  bool isValid = checkType(getResult(), ElemKind::FloatTy, this);
-  isValid &= checkType(getData(), ElemKind::UInt8FusedQTy, this);
-  isValid &= checkType(getWeights(), ElemKind::FloatTy, this);
-  isValid &= checkType(getIndices(), ElemKind::Int64ITy, this);
-  isValid &= checkType(getLengths(), ElemKind::Int32ITy, this);
+static bool verifyFusedRowwiseQuantizedSparseLengthsSum(NodeValue result,
+                                                        NodeValue data,
+                                                        NodeValue indices,
+                                                        NodeValue lengths,
+                                                        NodeValue weights) {
+  const Node *parent = result.getNode();
+  bool isValid = checkType(result, ElemKind::FloatTy, parent);
+  isValid &= checkType(data, ElemKind::UInt8FusedQTy, parent);
+  isValid &= checkType(indices, ElemKind::Int64ITy, parent);
+  isValid &= checkType(lengths, ElemKind::Int32ITy, parent);
   isValid &= expectCompareTrue("Indices must be a 1D vector",
-                               getIndices().dims().size(), size_t(1), this);
+                               indices.dims().size(), size_t(1), parent);
   isValid &= expectCompareTrue("Lengths must be a 1D vector",
-                               getLengths().dims().size(), size_t(1), this);
-  isValid &= expectCompareTrue("Weights must be a 1D vector",
-                               getWeights().dims().size(), size_t(1), this);
-  isValid &=
-      expectCompareTrue("Weights and Indices must have the same size",
-                        getWeights().dims()[0], getIndices().dims()[0], this);
+                               lengths.dims().size(), size_t(1), parent);
   isValid &= expectCompareTrue("Data must be 2 dimensional.",
-                               getData().dims().size(), size_t(2), this);
+                               data.dims().size(), size_t(2), parent);
   isValid &= expectCompareTrue("Data must have more than 8 columns.",
-                               getData().dims()[1], size_t(8), this,
+                               data.dims()[1], size_t(8), parent,
                                CompareOperatorGreaterEqual<size_t>());
   isValid &= expectCompareTrue("Result must be 2 dimensional.",
-                               getResult().dims().size(), size_t(2), this);
+                               result.dims().size(), size_t(2), parent);
+
+  if (weights.getNode()) {
+    isValid &= checkType(weights, ElemKind::FloatTy, parent);
+    isValid &= expectCompareTrue("Weights must be a 1D vector",
+                                 weights.dims().size(), size_t(1), parent);
+    isValid &= expectCompareTrue("Weights and Indices must have the same size",
+                                 weights.dims()[0], indices.dims()[0], parent);
+  }
+
   // Wrap this in isValid to prevent potential segfault if the result is
   // incorrectly shaped.
   if (isValid) {
     isValid &= expectCompareTrue(
         "Result output shape should have second dim as 8 less than Data.",
-        getResult().dims()[1] + 8, getData().dims()[1], this);
+        result.dims()[1] + 8, data.dims()[1], parent);
   }
   return isValid;
+}
+
+bool FusedRowwiseQuantizedSparseLengthsWeightedSumNode::verify() const {
+  return verifyFusedRowwiseQuantizedSparseLengthsSum(
+      getResult(), getData(), getIndices(), getLengths(), getWeights());
+}
+
+bool FusedRowwiseQuantizedSparseLengthsSumNode::verify() const {
+  return verifyFusedRowwiseQuantizedSparseLengthsSum(
+      getResult(), getData(), getIndices(), getLengths(), nullptr);
 }
 
 bool LengthsToRangesNode::verify() const {
@@ -946,6 +1064,16 @@ bool LengthsToRangesNode::verify() const {
       getResult().dims()[0], getLengths().dims()[0], this);
   isValid &= expectCompareTrue("Inner dimension of Ranges must be 2",
                                getResult().dims()[1], size_t(2), this);
+  return isValid;
+}
+
+bool LengthsRangeFillNode::verify() const {
+  bool isValid = checkType(getLengths(), ElemKind::Int32ITy, this);
+  isValid &= checkType(getResult(), getLengths().getElementType(), this);
+  isValid &= expectCompareTrue("Lengths must be a 1D vector",
+                               getLengths().dims().size(), size_t(1), this);
+  isValid &= expectCompareTrue("Result must be a 1D vector",
+                               getResult().dims().size(), size_t(1), this);
   return isValid;
 }
 
@@ -1170,6 +1298,22 @@ bool BatchOneHotNode::verify() const {
       expectCompareTrue("Size of Lengths should be equal to width of Data",
                         lengthsDims[0], dataDims[1], this);
   return isValid;
+}
+
+bool SpaceToDepthNode::verify() const {
+  auto inputN = getInput();
+  auto resultN = getResult();
+  auto inputDims = inputN.dims();
+  auto outputDims = resultN.dims();
+  unsigned blockSize = getBlockSize();
+
+  bool sameType = checkTypeIgnoreShape(inputN, resultN, this);
+  bool dimTransform = inputDims[0] == outputDims[0] &&
+                      inputDims[1] == outputDims[1] * blockSize &&
+                      inputDims[2] == outputDims[2] * blockSize &&
+                      inputDims[3] * blockSize * blockSize == outputDims[3];
+
+  return sameType && dimTransform;
 }
 
 bool SaveNode::verify() const {

@@ -3,15 +3,20 @@ if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
 else()
   find_program(CLANG_BIN clang++)
 endif()
-if(MSVC)
-    set(LLVM_LINK_BIN ${LLVM_BINARY_DIR}/$(Configuration)/bin/llvm-link)
-else()
-    set(LLVM_LINK_BIN ${LLVM_BINARY_DIR}/bin/llvm-link)
+if(NOT CLANG_BIN)
+  message(SEND_ERROR "unable to find clang, cannot build the CPU runtime")
 endif()
 
-set(CMAKE_LLIR_CREATE_SHARED_LIBRARY "${LLVM_LINK_BIN} -o <TARGET> <OBJECTS>")
-set(CMAKE_LLIR_CREATE_SHARED_MODULE "${LLVM_LINK_BIN} -o <TARGET> <OBJECTS>")
-set(CMAKE_LLIR_CREATE_STATIC_LIBRARY "${LLVM_LINK_BIN} -o <TARGET> <OBJECTS>")
+if(NOT LLVM_LINK_BIN)
+  if(MSVC)
+    set(LLVM_LINK_BIN ${LLVM_BINARY_DIR}/$(Configuration)/bin/llvm-link)
+  else()
+    set(LLVM_LINK_BIN ${LLVM_BINARY_DIR}/bin/llvm-link)
+  endif()
+endif()
+if(NOT EXISTS ${LLVM_LINK_BIN} AND NOT MSVC)
+  message(SEND_ERROR "unable to find llvm-link, cannot build the CPU runtime")
+endif()
 
 set(CPURunttimeCompilationOptions
       -std=c++14
@@ -70,11 +75,12 @@ endif(NOT MSVC)
 
 add_library(CPUBackend
             "${CMAKE_BINARY_DIR}/glow/CPU/libjit_bc.inc"
-            CPUFunction.cpp
-            Transforms.cpp
             CPUBackend.cpp
-            CPULLVMIRGen.cpp)
-
+            CPUDeviceManager.cpp
+            CPUFactory.cpp
+            CPUFunction.cpp
+            CPULLVMIRGen.cpp
+            Transforms.cpp)
 target_link_libraries(CPUBackend
                       PUBLIC
                         Backend
@@ -82,29 +88,9 @@ target_link_libraries(CPUBackend
                         CodeGen
                         Graph
                         IR
-                        Optimizer
+                        IROptimizer
                         QuantizationBase
                         LLVMIRCodeGen)
 add_dependencies(CPUBackend CPURuntime)
 
-add_library(CPUFactory
-              CPUFactory.cpp)
-target_link_libraries(CPUFactory
-                      PRIVATE
-                        CPUBackend)
-
-add_library(CPUDeviceManager
-            CPUDeviceManager.cpp)
-target_link_libraries(CPUDeviceManager
-                      PRIVATE
-                        Backends
-                        Base
-                        CodeGen
-                        CPUBackend
-                        Graph
-                        IR
-                        Optimizer
-                        ThreadPool)
-
-set(linked_factories ${linked_factories} CPUFactory PARENT_SCOPE)
-set(linked_device_managers ${linked_device_managers} CPUDeviceManager PARENT_SCOPE)
+set(linked_backends ${linked_backends} CPUBackend PARENT_SCOPE)

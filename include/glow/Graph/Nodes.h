@@ -91,8 +91,20 @@ public:
     return k->getKind() == Kinded::Kind::ConstantKind;
   }
 
-  Tensor &getPayload() { return payload_; }
+  /// \returns a mutable reference to the payload tensor. If the payload tensor
+  /// is unowned then it will be converted to an owned copy before returning.
+  Tensor &getPayloadMutable() {
+    // If payload is unowned, make an owned copy of the payload for
+    // modification.
+    if (payload_.isUnowned()) {
+      payload_ = payload_.clone();
+    }
+    assert(!payload_.isUnowned() &&
+           "Can only modify Constants with owned payloads");
+    return payload_;
+  }
 
+  // Get an immutable reference to the payload tensor.
   const Tensor &getPayload() const { return payload_; }
 
   template <class ElemTy = float> Handle<ElemTy> getHandle() {
@@ -101,9 +113,13 @@ public:
 
   void assign(const Tensor *t) { payload_.assign(t); }
 
+  void setPayloadType(TypeRef ty) { payload_.setType(ty); }
+
   std::string getDebugDesc() const;
 
   llvm::hash_code getHash() const;
+
+  void clearPayload() { payload_.release(); }
 
   bool verify() const;
 };
@@ -114,6 +130,9 @@ public:
 class Placeholder : public Storage {
   /// Specifies if the placeholder is trainable.
   bool isTrainable_;
+
+  /// Specifies if associated Tensors should be zeroed when allocated.
+  bool allocZero_{false};
 
 public:
   /// Create a new placeholder.
@@ -126,6 +145,12 @@ public:
   /// \returns True if the placeholder are trainable during
   /// differentiation.
   bool isTraining() const { return isTrainable_; }
+
+  /// \returns True if associated Tensors should be zeroed when allocated.
+  bool allocZero() const { return allocZero_; }
+
+  /// Sets whether or not associated Tensors should be zeroed.
+  void setAllocZero(bool on = true) { allocZero_ = on; }
 
   static bool classof(const Kinded *k) {
     return k->getKind() == Kinded::Kind::PlaceholderKind;
@@ -140,13 +165,19 @@ public:
 /// parameters.
 inline std::pair<size_t, size_t> calculateConvPoolOutputDims(
     size_t sx, size_t sy, llvm::ArrayRef<unsigned_t> kernels,
-    llvm::ArrayRef<unsigned_t> strides, llvm::ArrayRef<unsigned_t> pads) {
+    llvm::ArrayRef<unsigned_t> strides, llvm::ArrayRef<unsigned_t> pads,
+    unsigned_t dilation = 1) {
   PaddingTLBR pdim(pads);
   ShapeHW kdim(kernels);
   ShapeHW sdim(strides);
-  size_t outsx =
-      ((sx + pdim.top + pdim.bottom - kdim.height) / sdim.height + 1);
-  size_t outsy = ((sy + pdim.left + pdim.right - kdim.width) / sdim.width + 1);
+  size_t outsx = ((sx + pdim.top + pdim.bottom - kdim.height -
+                   (kdim.height - 1) * (dilation - 1)) /
+                      sdim.height +
+                  1);
+  size_t outsy = ((sy + pdim.left + pdim.right - kdim.width -
+                   (kdim.width - 1) * (dilation - 1)) /
+                      sdim.width +
+                  1);
   return {outsx, outsy};
 }
 

@@ -45,7 +45,7 @@ can be used to calculate Top-1 and Top-5 accuracy. It can be run via a command
 like the following:
 
 ```
-python utils/imagenet_topk_accuracy_driver.py --batch-size=10 --validation-images-dir=${PATH_TO_IMAGES} --image-classifier-cmd="${PATH_TO_IMAGE_CLASSIFIER_BINARY} -image-mode=0to1 -m=${PATH_TO_RESNET50_PROTOS_DIR} -model-input-name=gpu_0/data -cpu -topk=5 -"
+python utils/imagenet_topk_accuracy_driver.py --batch-size=10 --validation-images-dir=${PATH_TO_IMAGES} --image-classifier-cmd="${PATH_TO_IMAGE_CLASSIFIER_BINARY} -image-mode=0to1 -m=${PATH_TO_RESNET50_PROTOS_DIR} -model-input-name=gpu_0/data -backend=CPU -topk=5 -"
 ```
 
 Note that the `--image-classifier-cmd` must include `-topk=5` for printing the
@@ -74,7 +74,7 @@ for the model. A backend can be optionally specified, just like for the
 `image-classifier`.
 
 ```
-$ ./bin/text-translator -m en2gr -cpu
+$ ./bin/text-translator -m en2gr -backend=CPU
 
 Enter a sentence in English to translate to German: My favorite sport is basketball .
 mein Lieblingssport ist Basketball .
@@ -88,15 +88,14 @@ input model must be unrolled to some maximum input and output length. These can
 be specified on the command line via `-max-input-len` and
 `-max-output-len`. Additionally, the beam search size can be specified via
 `-beam-size`. The default options for the `text-translator` match those for the
-en2gr model currently downloaded via `utils/download_caffe2_models.sh`
+en2gr model currently downloaded via `utils/download_datasets_and_models.py`
 (`-max-input-len=10`, `-max-output-len=14`, `-beam-size=6`).
 
 ## Caffe2 and ONNX Models
 
 Model loader programs (e.g. `image-classifier` and `text-translator`) load
 pre-trained models from protobuf file (either Caffe2 or ONNX). These pre-trained
-models are downloaded via `download_caffe2_models.sh` and
-`download_onnx_models.sh` scripts located in `utils/`.
+models are downloaded via `download_datasets_and_models.py` script located in `utils/`.
 
 There is a more general way to run a pre-trained model, not related to images.
 The `model-runner` program loads and runs a self-contained model, i.e. a model,

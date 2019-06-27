@@ -16,7 +16,7 @@
 #ifndef GLOW_BACKENDS_CPU_CPUBACKEND_H
 #define GLOW_BACKENDS_CPU_CPUBACKEND_H
 
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 #include "glow/Base/Tensor.h"
 #include "glow/LLVMIRCodeGen/LLVMBackend.h"
 
@@ -34,13 +34,13 @@ public:
   /// @name Backend methods.
   /// This is the implementation of the Backend interface.
   ///@{
-  BackendKind getBackendKind() const override { return BackendKind::CPU; }
   virtual ~CPUBackend() override = default;
 
-  std::string getBackendName() const override { return "CPU"; }
+  std::string getBackendName() const override { return getName(); }
+  static std::string getName() { return "CPU"; }
 
   bool transformPostLowering(Function *F,
-                             const CompilationContext &cctx) const override;
+                             CompilationContext &cctx) const override;
 
   bool isOpSupported(const NodeInfo &NI) const override;
 

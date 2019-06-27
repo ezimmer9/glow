@@ -18,21 +18,23 @@ add_library(onnxifi-glow-lib
 target_link_libraries(onnxifi-glow-lib
                       PUBLIC
                         Backends
+                        ExecutionContext
                         ExecutionEngine
                         Graph
                         HostManager
                         Importer
-                        Optimizer
+                        GraphOptimizer
                         Quantization)
 
 target_link_libraries(onnxifi-glow
                       PUBLIC
                         Backends
+                        ExecutionContext
                         ExecutionEngine
                         Graph
                         HostManager
                         Importer
-                        Optimizer
+                        GraphOptimizer
                         Quantization)
 
 target_compile_definitions(onnxifi-glow

@@ -19,9 +19,9 @@
 #include "glow/LLVMIRCodeGen/GlowJIT.h"
 #include "glow/LLVMIRCodeGen/LLVMCompiledFunction.h"
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/BackendUtils.h"
-#include "glow/Backends/CompiledFunction.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/BackendUtils.h"
+#include "glow/Backend/CompiledFunction.h"
 
 namespace glow {
 /// A Glow IR function compiled for the CPU using LLVM.
@@ -33,12 +33,10 @@ public:
   /// \name CompiledFunction interface
   ///@{
   ~CPUFunction() override = default;
-  void execute(ExecutionContext *context) override;
+  llvm::Error execute(ExecutionContext *context) override;
 
-  /// \returns the Kind of Backend used to compile this function.
-  virtual BackendKind getCompileBackendKind() const override {
-    return BackendKind::CPU;
-  }
+  /// \returns the backend used to compile this function.
+  virtual std::string getCompileBackendName() const override { return "CPU"; }
   ///@}
   //
 };

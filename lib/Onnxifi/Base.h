@@ -16,10 +16,11 @@
 #ifndef GLOW_ONNXIFI_BASE_H
 #define GLOW_ONNXIFI_BASE_H
 
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Importer/ONNXIFIModelLoader.h"
 #include "glow/Runtime/RuntimeTypes.h"
+#include "glow/Support/TensorPool.h"
 
 #include "foxi/onnxifi.h"
 #include "foxi/onnxifi_ext.h"
@@ -35,16 +36,17 @@ namespace onnxifi {
 
 class Graph;
 
-/// BackendId associated with the Glow backend.
-class BackendId {
+/// Backend associated with the Glow backend.
+class Backend {
 public:
   /// Create Glow ONNXIFI backend identifier with the
-  /// given Glow backend \p kind, whether to use onnx or caffe2 for models
+  /// given Glow backend \p backendName, whether to use onnx or caffe2 for
+  /// models
   /// (\p useOnnx)
-  BackendId(glow::BackendKind kind, bool useOnnx)
-      : useOnnx_(useOnnx), glowBackend_(createBackend(kind)) {}
+  Backend(llvm::StringRef backendName, bool useOnnx)
+      : useOnnx_(useOnnx), glowBackend_(createBackend(backendName)) {}
 
-  virtual ~BackendId() = default;
+  virtual ~Backend() = default;
 
   /// Verify that a given onnx graph is supported by the backend by importing
   /// the onnx graph to a glow function, lowering this function, and checking
@@ -56,30 +58,20 @@ public:
   /// \returns the whether use onnx or not.
   bool getUseOnnx() const { return useOnnx_; }
 
+  /// \returns a reference to the backend.
+  const glow::Backend &getBackend() const { return *glowBackend_; }
+
   virtual void runNetwork(const Graph *graph,
                           std::unique_ptr<ExecutionContext> context,
                           runtime::ResultCBTy callback) {}
 
-  virtual void removeNetwork(const Graph *graph) {}
+  virtual onnxStatus removeNetwork(const Graph *graph) {
+    return ONNXIFI_STATUS_SUCCESS;
+  }
 
 protected:
   bool useOnnx_;
   std::unique_ptr<glow::Backend> glowBackend_;
-};
-
-typedef BackendId *BackendIdPtr;
-
-class Backend {
-public:
-  explicit Backend(BackendIdPtr backendId) : backendIdPtr_(backendId) {}
-
-  /// Whether this backend uses ONNX proto or Caffe2 proto.
-  bool getUseOnnx() const { return backendIdPtr_->getUseOnnx(); }
-
-  BackendId *getBackendId() { return backendIdPtr_; }
-
-private:
-  BackendIdPtr backendIdPtr_;
 };
 
 typedef Backend *BackendPtr;
@@ -130,16 +122,14 @@ public:
   initGraph(const void *onnxModel, size_t onnxModelSize, uint32_t weightCount,
             const onnxTensorDescriptorV1 *weightDescriptors) = 0;
 
-  virtual onnxStatus
-  run(std::unique_ptr<ExecutionContext> ctx, EventPtr outputEvent,
-      std::unordered_map<Placeholder *, onnxTensorDescriptorV1>
-          phNameToOnnxTensorOutputs,
-      onnxTraceEventList *traceEvents) = 0;
+  virtual onnxStatus run(std::unique_ptr<ExecutionContext> ctx,
+                         EventPtr outputEvent,
+                         onnxTraceEventList *traceEvents) = 0;
 
   /// Copy any trace events \p traceContext into \p traceEvents. If
   /// \p traceEvents is null then do nothing.
   static void setTraceEvents(onnxTraceEventList *traceEvents,
-                             const TraceContext &traceContext);
+                             TraceContext *traceContext);
 
   /// Free all memory that was allocated by setTraceEvents when creating \p
   /// traceEvents.
@@ -155,6 +145,9 @@ protected:
   /// Mapping between ONNX name for the output variable and Glow
   /// placeholder for output.
   llvm::StringMap<Placeholder *> onnxOutputToPlaceholder_;
+
+  /// An object pool for tensors, to share allocations.
+  TensorPool tensorPool_;
 };
 
 typedef Graph *GraphPtr;

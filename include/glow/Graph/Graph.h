@@ -17,6 +17,7 @@
 #define GLOW_GRAPH_GRAPH_H
 
 #include "glow/Base/Type.h"
+#include "glow/Graph/Log.h"
 #include "glow/Graph/Nodes.h"
 #include "glow/Quantization/Base/Base.h"
 
@@ -59,6 +60,9 @@ class Module final {
   PlaceholderList placeholders_;
   /// Deterministic PRNG used to initialize weights in this module.
   PseudoRNG PRNG_;
+
+  /// Module log context that stores all logs related to this module.
+  ModuleLogContext moduleLogCtx_;
 
 public:
   Module() = default;
@@ -152,6 +156,8 @@ public:
 
   Constant *createConstant(llvm::StringRef name, const Tensor &tensor);
 
+  Constant *createConstant(llvm::StringRef name, Tensor &&tensor);
+
   ///@}
 
   /// Verify the correctness of the Module.
@@ -161,8 +167,14 @@ public:
   /// Get the pseudo-random number generator used by this module.
   PseudoRNG &getPRNG() { return PRNG_; }
 
-  /// Dumps the textual representation of the network.
+  /// Dump a textual representation of the Module into default output stream.
   void dump() const;
+
+  /// Dump a textual representation of the Module to std::string.
+  std::string toString() const;
+
+  /// Dump a textual representation of the Module into provided output stream.
+  void dump(llvm::raw_ostream &os) const;
 
   /// Dump a dotty graph that depicts the Module.
   void dumpDAG();
@@ -176,15 +188,22 @@ public:
   /// Erase all of the functions from the module.
   void eraseFunctions();
 
-  /// Erase all the functions, variables, etc. If \p clearPlaceholders is false
-  /// then placeholders in the module will not be cleared out.
-  void clear(bool clearPlaceholders = true);
+  /// Erase all the functions, variables, etc.
+  void clear();
+
+  /// Strips payloads from constants. This is useful when
+  /// the Module will be kept around for metadata but we want to reduce memory
+  /// use. Unlike clear this leaves PHs and Constants in the module.
+  void strip();
 
   /// Erase a function \p F from the module.
   void eraseFunction(Function *F);
 
   /// \Returns the size in bytes of data used by constants.
   uint64_t getConstantsSize();
+
+  /// \Returns the module log context.
+  ModuleLogContext &getModuleLogContext() { return moduleLogCtx_; };
 
   // Don't copy or move this class around.
   // The destructor will wipe the functions leaving
@@ -210,11 +229,20 @@ class Function final : public Named {
   /// A reference to the owner of the function.
   Module *parent_;
 
+  /// The log context associated with this function.
+  std::shared_ptr<LogContext> logCtx_;
+
 public:
   Function(Module *parent, llvm::StringRef Name = {})
-      : Named(Name), parent_(parent) {}
+      : Named(Name), parent_(parent) {
+    logCtx_ = std::make_shared<LogContext>();
+    logCtx_->setParent(this);
+  }
 
   ~Function();
+
+  /// Return the log context.
+  std::shared_ptr<LogContext> getLogContext() { return logCtx_; }
 
   /// Add placeholder for metadata such as profiling.
   void addMetadataPlaceholder(Placeholder *PH) {
@@ -253,7 +281,19 @@ public:
   template <class NodeTy> NodeTy *addNode(NodeTy *N) {
     N->setName(Module::uniqueName(N->getName(), uniqueNodeNames_));
     nodes_.push_back(N);
+
+    // Log the node creation.
+    logCtx_->logNodeCreation(*N);
+
     return N;
+  }
+
+  /// Take ownership of \p N by removing it from its original Function, add it
+  /// to the current Function, and also unique its name.
+  void takeOwnershipOfNode(Node *N) {
+    N->getParent()->getNodes().remove(N);
+    N->setName(Module::uniqueName(N->getName(), uniqueNodeNames_));
+    nodes_.push_back(N);
   }
 
   /// Get the pseudo-random number generator used by this module.
@@ -271,13 +311,16 @@ public:
   /// of steps to take in the input for each output cell. \p pads defines how
   /// many zero padding cells should be added to the input during convolution.
   /// \p group defines the number of groups the input and output channels should
-  /// be divided into and convolved separately.
+  /// be divided into and convolved separately. \p dilation defines factor by
+  /// which gap between 2 neighboring kernel elements is expanded along each
+  /// axis.
+
   ConvolutionNode *createConv(llvm::StringRef name, NodeValue input,
                               NodeValue filter, NodeValue bias, TypeRef outTy,
                               llvm::ArrayRef<unsigned_t> kernels,
                               llvm::ArrayRef<unsigned_t> strides,
-                              llvm::ArrayRef<unsigned_t> pads,
-                              unsigned_t group);
+                              llvm::ArrayRef<unsigned_t> pads, unsigned_t group,
+                              unsigned_t dilation = 1);
 
   /// Creates a ConvolutionNode with the given \p name which convolves the 4D
   /// \p input with \p filter and \bias. \p kernel defines the size of the
@@ -285,11 +328,15 @@ public:
   /// of steps to take in the input for each output cell. \p pad defines how
   /// many zero padding cells should be added to the input during convolution.
   /// \p group defines the number of groups the input and output channels should
-  /// be divided into and convolved separately.
+  /// be divided into and convolved separately. \p dilation defines factor by
+  /// which gap between 2 neighboring kernel elements is expanded along each
+  /// axis.
+
   ConvolutionNode *createConv(llvm::StringRef name, NodeValue input,
                               NodeValue filter, NodeValue bias, TypeRef outTy,
                               unsigned_t kernel, unsigned_t stride,
-                              unsigned_t pad, unsigned_t group);
+                              unsigned_t pad, unsigned_t group,
+                              unsigned_t dilation = 1);
 
   /// Creates a Convolution3DNode with the given \p name which convolves the 5D
   /// \p input with \p filter and \bias. \p kernels defines the size of the
@@ -320,6 +367,23 @@ public:
                                   TypeRef outTy, unsigned_t kernel,
                                   unsigned_t stride, unsigned_t pad,
                                   unsigned_t group);
+
+  /// Creates a ChannelwiseQuantizedConvolutionNode with the given \p name which
+  /// convolves the 4D \p input with \p filter and \bias. \p scales and \p
+  /// offsets provide individual quantization parameters for each filter group
+  /// in \p filter. \p kernels defines the size of the height and width
+  /// dimensions of the filters. \p strides defines the number of steps to take
+  /// in the input for each output cell. \p pads defines how many zero padding
+  /// cells should be added to the input during convolution. \p group defines
+  /// the number of groups the input and output channels should be divided into
+  /// and convolved separately.
+  /// NOTE: ChannelwiseQuantizedConvolutionNode does not yet have an
+  /// implementation so attempting to run a graph containing this node fails.
+  ChannelwiseQuantizedConvolutionNode *createChannelwiseQuantizedConv(
+      llvm::StringRef name, NodeValue input, Constant *filter, Constant *bias,
+      Constant *scales, Constant *offsets, TypeRef outTy,
+      llvm::ArrayRef<unsigned_t> kernels, llvm::ArrayRef<unsigned_t> strides,
+      llvm::ArrayRef<unsigned_t> pads, unsigned_t group);
 
   ConvertToNode *createConvertTo(llvm::StringRef name, NodeValue input,
                                  TypeRef outTy);
@@ -422,6 +486,10 @@ public:
   /// Create a Tanh node with the given \p name and \p input.
   /// Result type will be implicitly set based on the \p input type.
   TanhNode *createTanh(llvm::StringRef name, NodeValue input);
+
+  /// Create an Exp  node with \p name, which calculates element-wise
+  /// exponential of \p input.
+  ExpNode *createExp(llvm::StringRef name, NodeValue input);
 
   /// Create a Log node with \p name, which calculates element-wise natural log
   /// of \p input, with output type \p outTy.
@@ -596,20 +664,11 @@ public:
   MatMulNode *createMatMul(llvm::StringRef name, TypeRef outTy, NodeValue lhs,
                            NodeValue rhs);
 
-  /// \p lhs is a 3d matrix, where the leading dimension is the batch size. \p
-  /// rhs is a 2d matrix, which every batch from \p lhs (a 2d matrix) is
-  /// multiplied by. This is implemented via reshaping \p lhs to be a 2d matrix,
-  /// multiplying by \p rhs, and then reshaping the result back to 3d.
-  Node *createBroadcastedBatchMatMul(llvm::StringRef name, NodeValue lhs,
-                                     NodeValue rhs);
-
   /// \p lhs and \p rhs are 3d matrices, where the leading dimension is the
   /// batch size. For each batch element number i, lhs.slice(i) is multiplied by
-  /// rhs.slice(i). This is implemented by unrolling loop over batch size and
-  /// issuing multiple slice, reshape and matmul instructions, and then
-  /// concatenating results and bringing them back to 3d shape.
-  Node *createParallelBatchMatMul(llvm::StringRef name, NodeValue lhs,
-                                  NodeValue rhs);
+  /// rhs.slice(i).
+  BatchMatMulNode *createBatchMatMul(llvm::StringRef name, NodeValue lhs,
+                                     NodeValue rhs);
 
   /// Create a node, performing BatchedReduceAdd operation. Output type is
   /// based on the input \p batch type with dimensions specified with \p axes
@@ -658,10 +717,10 @@ public:
   /// first Lengths[0] slices are aggregated to Result[0], next Lengths[1]
   /// slices are aggregated to Result[1], etc. I.e. sum(Lengths) must be equal
   /// to len(Indices).
-  SparseLengthsWeightedSumNode *createSparseLengthsSum(llvm::StringRef name,
-                                                       NodeValue data,
-                                                       NodeValue indices,
-                                                       NodeValue lengths);
+  SparseLengthsSumNode *createSparseLengthsSum(llvm::StringRef name,
+                                               NodeValue data,
+                                               NodeValue indices,
+                                               NodeValue lengths);
 
   /// Same as SparseLengthsSum, but i-th slice is multiplied by weights[i].
   /// len(weights) must be equal to len(indices).
@@ -718,14 +777,14 @@ public:
   /// them into len(\p lengths) entries: first Lengths[0] slices are aggregated
   /// to Result[0], next Lengths[1] slices are aggregated to Result[1], etc.
   /// I.e. sum(Lengths) must be equal to len(Indices).
-  FusedRowwiseQuantizedSparseLengthsWeightedSumNode *
+  FusedRowwiseQuantizedSparseLengthsSumNode *
   createFusedRowwiseQuantizedSparseLengthsSum(llvm::StringRef name,
                                               Constant *data, NodeValue indices,
                                               NodeValue lengths);
 
   /// Same as \ref createFusedRowwiseQuantizedSparseLengthsSum(), but expects
   /// float input \p data, which is rowwise-quantized and fused internally.
-  FusedRowwiseQuantizedSparseLengthsWeightedSumNode *
+  FusedRowwiseQuantizedSparseLengthsSumNode *
   createFusedRowwiseQuantizedSparseLengthsSum(llvm::StringRef name,
                                               Tensor &data, NodeValue indices,
                                               NodeValue lengths);
@@ -734,7 +793,7 @@ public:
   /// is multiplied by weights[i]. len(weights) must be equal to len(indices).
   FusedRowwiseQuantizedSparseLengthsWeightedSumNode *
   createFusedRowwiseQuantizedSparseLengthsWeightedSum(llvm::StringRef name,
-                                                      Tensor &data,
+                                                      NodeValue data,
                                                       NodeValue weights,
                                                       NodeValue indices,
                                                       NodeValue lengths);
@@ -744,7 +803,7 @@ public:
   /// internally.
   FusedRowwiseQuantizedSparseLengthsWeightedSumNode *
   createFusedRowwiseQuantizedSparseLengthsWeightedSum(llvm::StringRef name,
-                                                      Constant *data,
+                                                      Tensor &data,
                                                       NodeValue weights,
                                                       NodeValue indices,
                                                       NodeValue lengths);
@@ -754,6 +813,14 @@ public:
   /// output is a Nx2 matrix with (offset, lengths) packaged for each segment.
   LengthsToRangesNode *createLengthsToRanges(llvm::StringRef name,
                                              NodeValue lengths);
+
+  /// Given a vector of \p lengths, \returns a LengthsRangeFillNode. This Node
+  /// calculates a range sequence given \p lengths, where the sum of the
+  /// elements of \p lengths must be no greater than \p maxOutputSize, which is
+  /// used to set the output type.
+  LengthsRangeFillNode *createLengthsRangeFill(llvm::StringRef name,
+                                               NodeValue lengths,
+                                               unsigned_t maxOutputSize);
 
   /// Implements an operation that converts the sparse representation given by
   /// the pair of \p indices and \p values into a dense representation.
@@ -849,6 +916,13 @@ public:
   BatchOneHotNode *createBatchOneHot(llvm::StringRef name, NodeValue data,
                                      NodeValue lengths, NodeValue values);
 
+  /// Given Input tensor of [N,H,W,C], where N is the batch
+  /// axis, H is the height, W is
+  /// the width, C is the channel or depth. This produces Output tensor of [N,
+  /// H/blockSize, W/blockSize, C * blockSize * blockSize].
+  SpaceToDepthNode *createSpaceToDepth(llvm::StringRef name, NodeValue input,
+                                       unsigned blockSize);
+
   /// Create quantization node which transforms floating point tensor to a
   /// quantized one with given Scale and Offset. Scale and Offset params are
   /// part of the \p outTy.
@@ -923,14 +997,16 @@ public:
   /// to take in the input for each output cell. \p pads defines how many zero
   /// padding cells should be added to the input during convolution. \p group
   /// defines the number of groups the input and output channels should be
-  /// divided into and convolved separately.
+  /// divided into and convolved separately. \p dilation defines factor by
+  /// which gap between 2 neighboring kernel elements is expanded along each
+  /// axis.
   ConvolutionNode *createConv(PlaceholderBindings &bindings,
                               llvm::StringRef name, NodeValue input,
                               size_t outChannels,
                               llvm::ArrayRef<unsigned_t> kernels,
                               llvm::ArrayRef<unsigned_t> strides,
-                              llvm::ArrayRef<unsigned_t> pads,
-                              unsigned_t group);
+                              llvm::ArrayRef<unsigned_t> pads, unsigned_t group,
+                              unsigned_t dilation = 1);
 
   /// Creates a ConvolutionNode with the given \p name which convolves the 4D
   /// \p input. \p kernel defines the size of the height and width dimensions of
@@ -938,12 +1014,14 @@ public:
   /// take in the input for each output cell. \p pad defines how many zero
   /// padding cells should be added to the input during convolution. \p group
   /// defines the number of groups the input and output channels should be
-  /// divided into and convolved separately.
+  /// divided into and convolved separately.\p dilation defines factor by
+  /// which gap between 2 neighboring kernel elements is expanded along each
+  /// axis.
   ConvolutionNode *createConv(PlaceholderBindings &bindings,
                               llvm::StringRef name, NodeValue input,
                               size_t outChannels, unsigned_t kernel,
                               unsigned_t stride, unsigned_t pad,
-                              unsigned_t group);
+                              unsigned_t group, unsigned_t dilation = 1);
 
   /// Creates a Convolution3DNode with the given \p name which convolves the 5D
   /// \p input. \p kernels defines the size of the height, width, and depth
@@ -992,9 +1070,9 @@ public:
   // The dimensionality of the output variables is \p batchSize x \p outputSize.
   void createSimpleRNN(PlaceholderBindings &bindings,
                        llvm::StringRef namePrefix,
-                       const llvm::ArrayRef<Node *> inputs, unsigned batchSize,
-                       unsigned hiddenSize, unsigned outputSize,
-                       std::vector<NodeValue> &outputs);
+                       const llvm::ArrayRef<NodeValue> inputs,
+                       unsigned batchSize, unsigned hiddenSize,
+                       unsigned outputSize, std::vector<NodeValue> &outputs);
 
   /// Create an unrolled single-layer GRU cell with \p hiddenSize
   /// dimensionality of the hidden state and \p outputSize dimensionality of the
@@ -1005,7 +1083,7 @@ public:
   /// activation of the output layer, unrolled over time.
   // The dimensionality of the output variables is \p batchSize x \p outputSize.
   void createGRU(PlaceholderBindings &bindings, llvm::StringRef namePrefix,
-                 const llvm::ArrayRef<Node *> inputs, unsigned batchSize,
+                 const llvm::ArrayRef<NodeValue> inputs, unsigned batchSize,
                  unsigned hiddenSize, unsigned outputSize,
                  std::vector<NodeValue> &outputs);
 
@@ -1018,7 +1096,7 @@ public:
   /// activation of the output layer, unrolled over time.
   // The dimensionality of the output variables is \p batchSize x \p outputSize.
   void createLSTM(PlaceholderBindings &bindings, llvm::StringRef namePrefix,
-                  const llvm::ArrayRef<Node *> inputs, unsigned batchSize,
+                  const llvm::ArrayRef<NodeValue> inputs, unsigned batchSize,
                   unsigned hiddenSize, unsigned outputSize,
                   std::vector<NodeValue> &outputs);
   /// @}
@@ -1046,8 +1124,14 @@ public:
   /// \returns true when the function is valid. False otherwise.
   bool verify() const;
 
-  /// Dumps the textual representation of the network.
+  /// Dump a textual representation of the Function into provided output stream.
   void dump() const;
+
+  /// Dump a textual representation of the Function to std::string.
+  std::string toString() const;
+
+  /// Dump a textual representation of the Function into default output stream.
+  void dump(llvm::raw_ostream &os) const;
 
   /// Dump a dotty graph that depicts the function into a file.
   /// \returns full path to the file.
@@ -1097,6 +1181,14 @@ SaveNode *getOutputSave(Function *F, Placeholder *PH);
   { 0u, 2u, 3u, 1u }
 #define NHWC2NCHW                                                              \
   { 0u, 3u, 1u, 2u }
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Module &mod);
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Module *mod);
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Function &F);
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Function *F);
 
 } // namespace glow
 

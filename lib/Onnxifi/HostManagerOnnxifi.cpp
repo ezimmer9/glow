@@ -16,28 +16,45 @@
 
 #include "HostManagerOnnxifi.h"
 
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
+
 namespace glow {
 namespace onnxifi {
 
-std::unique_ptr<runtime::HostManager>
-HostManagerBackendId::createHostManager(glow::BackendKind kind) {
-  std::vector<std::unique_ptr<runtime::DeviceConfig>> configs;
+int32_t GlowNumDevices = 1;
+bool GlowDumpDebugTraces = false;
 
-  auto config = llvm::make_unique<runtime::DeviceConfig>(kind);
-  configs.push_back(std::move(config));
+static llvm::cl::opt<int32_t, true>
+    GlowNumDevicesOpt("glow-num-devices",
+                      llvm::cl::desc("Number of devices for Glow backend"),
+                      llvm::cl::location(GlowNumDevices));
+
+static llvm::cl::opt<bool, true>
+    GlowDumpDebugTracesOpt("glow-dump-debug-traces",
+                           llvm::cl::desc("Dump a trace of each run to /tmp"),
+                           llvm::cl::location(GlowDumpDebugTraces));
+
+std::unique_ptr<runtime::HostManager>
+HostManagerBackend::createHostManager(llvm::StringRef backendName) {
+  std::vector<std::unique_ptr<runtime::DeviceConfig>> configs;
+  for (int i = 0; i < GlowNumDevices; i++) {
+    configs.push_back(llvm::make_unique<runtime::DeviceConfig>(backendName));
+  }
   return llvm::make_unique<runtime::HostManager>(std::move(configs));
 }
 
-void HostManagerBackendId::runNetwork(const Graph *graph,
-                                      std::unique_ptr<ExecutionContext> context,
-                                      runtime::ResultCBTy callback) {
+void HostManagerBackend::runNetwork(const Graph *graph,
+                                    std::unique_ptr<ExecutionContext> context,
+                                    runtime::ResultCBTy callback) {
   auto hostManagerGraph = static_cast<const HostManagerGraph *>(graph);
   hostManager_->runNetwork(hostManagerGraph->getName(), std::move(context),
                            std::move(callback));
 }
 
-onnxStatus HostManagerBackendId::addNetwork(std::unique_ptr<Module> module) {
-  auto err = hostManager_->addNetwork(std::move(module));
+onnxStatus HostManagerBackend::addNetwork(std::unique_ptr<Module> module) {
+  CompilationContext cctx;
+  auto err = hostManager_->addNetwork(std::move(module), cctx);
 
   if (errToBool(std::move(err))) {
     return ONNXIFI_STATUS_INTERNAL_ERROR;
@@ -46,9 +63,15 @@ onnxStatus HostManagerBackendId::addNetwork(std::unique_ptr<Module> module) {
   return ONNXIFI_STATUS_SUCCESS;
 }
 
-void HostManagerBackendId::removeNetwork(const Graph *graph) {
+onnxStatus HostManagerBackend::removeNetwork(const Graph *graph) {
   auto hostManagerGraph = static_cast<const HostManagerGraph *>(graph);
-  hostManager_->removeNetwork(hostManagerGraph->getName());
+  auto error = hostManager_->removeNetwork(hostManagerGraph->getName());
+
+  if (errorToBool(std::move(error))) {
+    return ONNXIFI_STATUS_INTERNAL_ERROR;
+  }
+
+  return ONNXIFI_STATUS_SUCCESS;
 }
 
 onnxStatus
@@ -70,22 +93,25 @@ HostManagerGraph::initGraph(const void *onnxModel, size_t onnxModelSize,
   onnxInputToPlaceholder_ = loader->getInputVarsMapping();
   onnxOutputToPlaceholder_ = loader->getOutputVarsMapping();
 
-  return static_cast<HostManagerBackendId *>(backendPtr_->getBackendId())
+  // Make sure the pool is ready to go.
+  for (auto &obj : onnxInputToPlaceholder_) {
+    tensorPool_.reserve(obj.second->getType(), 10);
+  }
+
+  return static_cast<HostManagerBackend *>(backendPtr_)
       ->addNetwork(std::move(module));
 }
 
-onnxStatus
-HostManagerGraph::run(std::unique_ptr<ExecutionContext> ctx,
-                      EventPtr outputEvent,
-                      std::unordered_map<Placeholder *, onnxTensorDescriptorV1>
-                          phNameToOnnxTensorOutputs,
-                      onnxTraceEventList *traceEvents) {
-  backendPtr_->getBackendId()->runNetwork(
+onnxStatus HostManagerGraph::run(std::unique_ptr<ExecutionContext> ctx,
+                                 EventPtr outputEvent,
+                                 onnxTraceEventList *traceEvents) {
+  backendPtr_->runNetwork(
       this, std::move(ctx),
-      [phNameToOnnxTensorOutputs = std::move(phNameToOnnxTensorOutputs),
-       outputEvent,
-       traceEvents](runtime::RunIdentifierTy runId, llvm::Error err,
-                    std::unique_ptr<ExecutionContext> ctx) {
+      [outputEvent, traceEvents](runtime::RunIdentifierTy runId,
+                                 llvm::Error err,
+                                 std::unique_ptr<ExecutionContext> ctx) {
+        TRACE_EVENT_SCOPE(ctx->getTraceContext(), TraceLevel::RUNTIME,
+                          "Onnxifi::callback");
         // If an Error occurred then log it in errToBool and signal the output
         // event.
         if (errToBool(std::move(err))) {
@@ -93,21 +119,24 @@ HostManagerGraph::run(std::unique_ptr<ExecutionContext> ctx,
           return;
         }
 
-        for (auto &ph : ctx->getPlaceholderBindings()->pairs()) {
-          if (phNameToOnnxTensorOutputs.count(ph.first) == 0) {
-            continue;
-          }
-
-          auto &outOnnxTensor = phNameToOnnxTensorOutputs.at(ph.first);
-
-          void *outputAddress = reinterpret_cast<void *>(outOnnxTensor.buffer);
-          Tensor *res = ph.second;
-          memcpy(outputAddress, res->getUnsafePtr(),
-                 res->size() * res->getType().getElementSize());
-        }
+        // End the current trace event before we convert TraceEvents to the ONNX
+        // format.
+        TRACE_EVENT_SCOPE_END();
 
         if (auto *traceContext = ctx->getTraceContext()) {
-          setTraceEvents(traceEvents, *traceContext);
+          setTraceEvents(traceEvents, traceContext);
+
+          if (GlowDumpDebugTraces) {
+            llvm::SmallString<64> path;
+            auto tempFileRes =
+                llvm::sys::fs::createTemporaryFile("glow-trace", "json", path);
+            if (tempFileRes.value() != 0) {
+              LOG(ERROR) << "Failed to create temp file for Glow trace events: "
+                         << tempFileRes;
+            } else {
+              traceContext->dump(path);
+            }
+          }
         }
 
         outputEvent->signal();
@@ -117,8 +146,8 @@ HostManagerGraph::run(std::unique_ptr<ExecutionContext> ctx,
 }
 
 HostManagerGraph::~HostManagerGraph() {
-  // Remove network from the BackendId
-  backendPtr_->getBackendId()->removeNetwork(this);
+  // Remove network from the Backend
+  backendPtr_->removeNetwork(this);
 }
 
 size_t HostManagerGraph::makeUniqueGraphId() {

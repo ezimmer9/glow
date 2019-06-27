@@ -16,7 +16,7 @@
 #ifndef GLOW_RUNTIME_PROVISIONER_H
 #define GLOW_RUNTIME_PROVISIONER_H
 
-#include "glow/Backends/Backend.h"
+#include "glow/Backend/Backend.h"
 #include "glow/Backends/DeviceManager.h"
 #include "glow/Runtime/RuntimeTypes.h"
 #include "glow/Support/Error.h"
@@ -33,11 +33,13 @@ class Provisioner final {
 public:
   Provisioner(DeviceManagerMapTy &devices);
 
-  /// Walks \p networks and assigns each function to a DeviceManager in \p
-  /// devices. The Provisioner calls the addNetwork method for each
-  /// DeviceManager. Returns a GlowErr indicating if the operation was a
-  /// success.
-  llvm::Error provision(DAGListTy &networks, Module &module);
+  /// Traverses the DAG \p networks and:
+  ///   1. Retrieves each node's Function from the provided \p module.
+  ///   2. Compiles it using the provided CompilationContext \p cctx.
+  ///   3. Assigns a device and calls addNetwork on the chosen device(s).
+  /// \returns a GlowErr indicating if the operation was a success.
+  llvm::Error provision(DAGListTy &networks, Module &module,
+                        CompilationContext &cctx);
 
   /// Remove stored compiledFunction.
   void removeFunction(llvm::StringRef name);
@@ -45,7 +47,7 @@ public:
 private:
   /// Pointer to backend used for compilation. This currently gets reset per
   /// device to ensure the correct backed per device.
-  std::unique_ptr<Backend> backend_;
+  std::vector<std::unique_ptr<Backend>> backends_;
 
   /// Map of compiledFunction unique pointers. This maintains ownership of the
   /// functions.

@@ -22,11 +22,26 @@
 #include "glow/IR/IR.h"
 #include "glow/IR/IRBuilder.h"
 #include "glow/IR/Instrs.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Quantization/Quantization.h"
 
 #include "gtest/gtest.h"
 
+#include "llvm/Support/CommandLine.h"
+
 namespace glow {
+
+llvm::cl::OptionCategory operatorTestCat("OperatorTest Category");
+
+unsigned parCloneCountOpt;
+llvm::cl::opt<unsigned, /* ExternalStorage */ true> parCloneCountI(
+    "parallel-clone-count",
+    llvm::cl::desc(
+        "Number of times to clone a graph in parallel. Intended to stress test "
+        "different backends. This option is not used by all unit "
+        "tests; for now you must check the test to see if so."),
+    llvm::cl::location(parCloneCountOpt), llvm::cl::Optional, llvm::cl::init(1),
+    llvm::cl::cat(operatorTestCat));
 
 using llvm::cast;
 
@@ -56,117 +71,197 @@ static Placeholder *createQuantizedPlaceholder(Module &mod,
   return P;
 }
 
-/// Clone, profile, and run \p origF given the \p ctx and \p EE. \returns the
-/// quantization parameters from the profile, given the lowered info passed in
-/// via \p loweredMap, and the specified \p schema.
+/// Clone, profile, and run \p origF given the \p bindings and \p EE. \returns
+/// the quantization parameters from the profile given the specified \p schema.
 static std::vector<NodeQuantizationInfo>
 profileAndGetNodeQuantizationInfo(PlaceholderBindings &bindings,
                                   ExecutionEngine &EE, Function *origF,
                                   quantization::Schema schema) {
-  // Lower everything for profiling in a cloned PF, keeping track of lowered
-  // info in loweredMap, which is then used when generating QI.
+  LoweredInfoMap loweredMapForProf;
+  CompilationContext cctx{&bindings, &loweredMapForProf};
+  cctx.precisionConfig.quantMode = QuantizationMode::Profile;
+
   Function *profileF = origF->clone("profile");
-  LoweredInfoMap loweredMap;
-  lower(profileF, &loweredMap, EE.getBackend());
-  glow::profileQuantization(bindings, profileF);
-  EE.compile(CompilationMode::Infer, profileF);
+  EE.compile(profileF, cctx);
 
   EE.run(bindings);
 
   return quantization::generateNodeQuantizationInfos(bindings, profileF,
-                                                     loweredMap, schema);
+                                                     loweredMapForProf, schema);
 }
 
-/// Helper to profile and quantize \p IF and/or \p BF if \p interpElemKind or \p
-/// backendElemKind are a quantized type. \p ICtx is used during profiling. \p
-/// IEE and \p BEE are used when quantizing as well.
-static void profileAndQuantize(PlaceholderBindings &Ibindings,
-                               ExecutionEngine &IEE, ExecutionEngine &BEE,
-                               Function *&IF, Function *&BF,
-                               ElemKind interpElemKind,
-                               ElemKind backendElemKind,
-                               quantization::Schema schema,
-                               bool enableRowwiseQuantization) {
-  quantization::QuantizationConfiguration quantConfig{
-      profileAndGetNodeQuantizationInfo(Ibindings, IEE, IF, schema)};
-  quantConfig.enableRowwise = enableRowwiseQuantization;
-  quantConfig.schema = schema;
-  quantConfig.assertAllNodesQuantized = true;
+/// Helper that sets up and \returns a pair of configs for both interpreter and
+/// backend being tested.
+static std::pair<CompilationContext, CompilationContext>
+setupInterpAndBackendConfigs(
+    Function *IF, ExecutionEngine &IEE, PlaceholderBindings &Ibindings,
+    LoweredInfoMap &ILIM, PlaceholderBindings &Bbindings, LoweredInfoMap &BLIM,
+    ElemKind interpElemKind, ElemKind backendElemKind,
+    quantization::Schema schema, bool enableRowwiseQuantization) {
+  CompilationContext cctxI{&Ibindings, &ILIM};
+  CompilationContext cctxB{&Bbindings, &BLIM};
+  PrecisionConfiguration &precConfigI = cctxI.precisionConfig;
+  PrecisionConfiguration &precConfigB = cctxB.precisionConfig;
 
-  if (isQuantizedElemKind(interpElemKind)) {
-    quantConfig.precision = interpElemKind;
-    // Lower only as the backends prefer for actually quantizing.
-    LoweredInfoMap loweredMapForQuant;
-    lower(IF, &loweredMapForQuant, IEE.getBackend());
-    quantization::quantizeFunction(IF, quantConfig, *IEE.getBackend(),
-                                   loweredMapForQuant);
+  if (isQuantizedElemKind(interpElemKind) ||
+      isQuantizedElemKind(backendElemKind)) {
+    // If either interp or backend need to be quantized then we need to profile
+    // and get quantization infos.
+    auto NQIS = profileAndGetNodeQuantizationInfo(Ibindings, IEE, IF, schema);
+
+    if (isQuantizedElemKind(interpElemKind)) {
+      precConfigI.quantMode = QuantizationMode::Quantize;
+      precConfigI.quantConfig.infos = NQIS;
+      precConfigI.quantConfig.enableRowwise = enableRowwiseQuantization;
+      precConfigI.quantConfig.schema = schema;
+      precConfigI.quantConfig.precision = interpElemKind;
+      precConfigI.quantConfig.assertAllNodesQuantized = true;
+    }
+
+    if (isQuantizedElemKind(backendElemKind)) {
+      precConfigB.quantMode = QuantizationMode::Quantize;
+      precConfigB.quantConfig.infos = NQIS;
+      precConfigB.quantConfig.enableRowwise = enableRowwiseQuantization;
+      precConfigB.quantConfig.schema = schema;
+      precConfigB.quantConfig.precision = backendElemKind;
+      precConfigB.quantConfig.assertAllNodesQuantized = true;
+    }
   }
-  if (isQuantizedElemKind(backendElemKind)) {
-    quantConfig.precision = backendElemKind;
-    // Lower only as the backends prefer for actually quantizing.
-    LoweredInfoMap loweredMapForQuant;
-    lower(BF, &loweredMapForQuant, BEE.getBackend());
-    quantization::quantizeFunction(BF, quantConfig, *BEE.getBackend(),
-                                   loweredMapForQuant);
-  }
+
+  precConfigI.convertToFP16 = interpElemKind == ElemKind::Float16Ty;
+  precConfigB.convertToFP16 = backendElemKind == ElemKind::Float16Ty;
+
+  return std::make_pair(cctxI, cctxB);
 }
-
 } // namespace
 
-void compareAgainstInterpreter(BackendKind backendKind,
+void compareAgainstInterpreter(llvm::StringRef backendName,
                                CreateAndInitFunction createAndInitFunction,
                                ElemKind interpElemKind,
                                ElemKind backendElemKind, float allowedError,
-                               bool enableRowwiseQuantization,
+                               unsigned count, bool enableRowwiseQuantization,
                                quantization::Schema schema) {
-  ExecutionEngine IEE{BackendKind::Interpreter};
-  ExecutionEngine BEE{backendKind};
+  ExecutionEngine IEE{"Interpreter"};
+  ExecutionEngine BEE{backendName};
   PlaceholderBindings Ibindings, Bbindings;
+
+  LOG(INFO) << "Comparing Interpreter with precision "
+            << Type::getElementName(interpElemKind).str() << " against "
+            << backendName.str() << " with precision "
+            << Type::getElementName(backendElemKind).str();
 
   // Create the same network on the interpreter and the backend being tested.
   FunctionTensorPair IFT = createAndInitFunction(Ibindings, IEE);
   FunctionTensorPair BFT = createAndInitFunction(Bbindings, BEE);
 
+  // Clone the Function inside itself many times if desired.
+  std::unordered_set<Tensor *> resultTensors =
+      cloneFunInsideFun(BFT, &Bbindings, count);
+  assert(resultTensors.size() == count &&
+         "Should get the same number of Tensors back as count.");
+
   Function *IF = IFT.first;
   Function *BF = BFT.first;
 
-  // If one or both functions will be quantized, then gather a profile the graph
-  // on the interpreter, and then quantize the Functions as requested.
-  const bool profAndQuant = isQuantizedElemKind(interpElemKind) ||
-                            isQuantizedElemKind(backendElemKind);
-  if (profAndQuant) {
-    profileAndQuantize(Ibindings, IEE, BEE, IF, BF, interpElemKind,
-                       backendElemKind, schema, enableRowwiseQuantization);
-  }
+  // Set up the configs for interpreter and backend. If one or both functions
+  // will be quantized, then gather a profile the graph on the interpreter, and
+  // then quantize the Functions as requested.
+  LoweredInfoMap ILIM, BLIM;
+  auto configs = setupInterpAndBackendConfigs(
+      IF, IEE, Ibindings, ILIM, Bbindings, BLIM, interpElemKind,
+      backendElemKind, schema, enableRowwiseQuantization);
+  CompilationContext &cctxI = configs.first;
+  CompilationContext &cctxB = configs.second;
 
-  if (interpElemKind == ElemKind::Float16Ty) {
-    TypeAToTypeBFunctionConverter converter(*IF, ElemKind::FloatTy,
-                                            ElemKind::Float16Ty);
-    converter.convert();
-  }
-  if (backendElemKind == ElemKind::Float16Ty) {
-    TypeAToTypeBFunctionConverter converter(*BF, ElemKind::FloatTy,
-                                            ElemKind::Float16Ty);
-    converter.convert();
-  }
-
-  BEE.compile(CompilationMode::Infer, BF);
+  BEE.compile(BF, cctxB);
   BEE.run(Bbindings);
 
-  // If we profiled above (always in FloatTy) then IF's result tensor is already
-  // set to the result of the original (FloatTy) IF. So if we did not run
-  // profiling, or if we did profile but also modified IF to be non-FloatTy,
-  // then we need to run again to get IF's result.
-  if (!profAndQuant || interpElemKind != ElemKind::FloatTy) {
-    IEE.compile(CompilationMode::Infer, IF);
+  // If we profiled inside of setupInterpAndBackendConfigs() (always in FloatTy)
+  // then IF's result tensor is already set to the result of the original
+  // (FloatTy) IF. So if we did not run profiling, or if we did profile but also
+  // modified IF to be non-FloatTy, then need to run again to get IF's result.
+  const bool alreadyProfiled = isQuantizedElemKind(interpElemKind) ||
+                               isQuantizedElemKind(backendElemKind);
+  if (!alreadyProfiled || interpElemKind != ElemKind::FloatTy) {
+    IEE.compile(IF, cctxI);
     IEE.run(Ibindings);
   }
 
-  EXPECT_TRUE(IFT.second->isEqual(*BFT.second, allowedError));
+  // Compare each of our result tensors to the original.
+  for (Tensor *T : resultTensors) {
+    EXPECT_TRUE(IFT.second->isEqual(*T, allowedError));
+  }
+}
+
+std::unordered_set<Tensor *> cloneFunInsideFun(FunctionTensorPair FTP,
+                                               PlaceholderBindings *bindings,
+                                               unsigned count) {
+  Function *origF = FTP.first;
+
+  // Always save the original Function's Tensor, which we will keep around.
+  std::unordered_set<Tensor *> resultTensors;
+  resultTensors.insert(FTP.second);
+
+  // Nothing to do if we just want the one.
+  if (count == 1) {
+    return resultTensors;
+  }
+
+  Module *mod = origF->getParent();
+
+  // Clone the original Function to repeatedly add it to the original.
+  auto *cloneF = origF->clone("single_clone");
+
+  // We keep the original Function, then clone/add count-1 more.
+  for (size_t i = 1; i < count; i++) {
+    // Clone the clone, and then add all the new nodes to the original function.
+    auto *tmpF = cloneF->clone("tmp" + std::to_string(i));
+    std::unordered_set<Node *> clonedNodes;
+    bool foundSaveNode = false;
+    for (auto &N : tmpF->getNodes()) {
+      clonedNodes.insert(&N);
+
+      // For every Node we add, check if it uses a Placeholder node, and if so
+      // clone it in the Module so that CSE doesn't undo all our hard work.
+      for (size_t j = 0, f = N.getNumInputs(); j < f; j++) {
+        Placeholder *origPH = llvm::dyn_cast<Placeholder>(N.getNthInput(j));
+        if (!origPH) {
+          continue;
+        }
+
+        // Clone the Placeholder, allocate it in the bindings, and replace the
+        // usage of the original node to point to the clone.
+        Placeholder *clonePH = mod->createPlaceholder(
+            origPH->getType(), origPH->getName(), origPH->isTraining());
+        Tensor *oldT = bindings->get(origPH);
+        assert(oldT);
+        Tensor *newT = bindings->allocate(clonePH);
+        newT->assign(oldT);
+        N.setNthInput(j, clonePH);
+
+        // Save the result Tensors to return so we can compare the results of
+        // all of our clones.
+        if (llvm::isa<SaveNode>(N)) {
+          assert(!foundSaveNode &&
+                 "Can only handle Functions with a single SaveNode.");
+          foundSaveNode = true;
+          resultTensors.insert(newT);
+        }
+      }
+    }
+    for (auto &N : clonedNodes) {
+      origF->takeOwnershipOfNode(N);
+    }
+  }
+  // Now erase the clone we used to copy in, as it's no longer needed.
+  mod->eraseFunction(cloneF);
+
+  return resultTensors;
 }
 
 void inferIntLookupTableNet(Tensor *input, Tensor *out,
-                            llvm::ArrayRef<int8_t> table, BackendKind kind) {
+                            llvm::ArrayRef<int8_t> table,
+                            llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -186,7 +281,7 @@ void inferIntLookupTableNet(Tensor *input, Tensor *out,
 }
 
 void inferConvNet(Tensor *inputs, Tensor *filter, Tensor *bias, Tensor *out,
-                  BackendKind kind) {
+                  llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -232,7 +327,7 @@ void inferConvNet(Tensor *inputs, Tensor *filter, Tensor *bias, Tensor *out,
 void trainConvNet(Tensor *inputs, Tensor *kernel1, Tensor *bias1,
                   Tensor *kernel2, Tensor *bias2, Tensor *selected,
                   llvm::ArrayRef<size_t> shape1, llvm::ArrayRef<size_t> shape2,
-                  Tensor *out, BackendKind kind) {
+                  Tensor *out, llvm::StringRef kind) {
   ExecutionEngine EE(kind);
   TrainingConfig TC;
   PlaceholderBindings bindings;
@@ -272,7 +367,7 @@ void trainConvNet(Tensor *inputs, Tensor *kernel1, Tensor *bias1,
 }
 
 void inferLocalResponseNormalizationNet(Tensor *inputs, Tensor *out,
-                                        BackendKind kind) {
+                                        llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -293,7 +388,7 @@ void trainLocalResponseNormalizationNet(Tensor *inputs, Tensor *weights,
                                         Tensor *bias, Tensor *selected,
                                         llvm::ArrayRef<size_t> shape1,
                                         llvm::ArrayRef<size_t> shape2,
-                                        Tensor *out, BackendKind kind) {
+                                        Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   TrainingConfig TC;
@@ -333,7 +428,7 @@ void trainLocalResponseNormalizationNet(Tensor *inputs, Tensor *weights,
 void trainAvgPoolNet(Tensor *inputs, Tensor *weights, Tensor *bias,
                      Tensor *selected, llvm::ArrayRef<size_t> shape1,
                      llvm::ArrayRef<size_t> shape2, Tensor *out,
-                     BackendKind kind) {
+                     llvm::StringRef kind) {
   ExecutionEngine EE(kind);
   TrainingConfig TC;
   PlaceholderBindings bindings;
@@ -373,7 +468,7 @@ void trainAvgPoolNet(Tensor *inputs, Tensor *weights, Tensor *bias,
 void trainMaxPoolNet(Tensor *inputs, Tensor *weights, Tensor *bias,
                      Tensor *selected, llvm::ArrayRef<size_t> shape1,
                      llvm::ArrayRef<size_t> shape2, Tensor *out,
-                     BackendKind kind) {
+                     llvm::StringRef kind) {
   ExecutionEngine EE(kind);
   TrainingConfig TC;
   PlaceholderBindings bindings;
@@ -409,7 +504,7 @@ void trainMaxPoolNet(Tensor *inputs, Tensor *weights, Tensor *bias,
   out->assign(resultTensor);
 }
 
-void inferSmallConv(Tensor *inputs, Tensor *out, BackendKind kind) {
+void inferSmallConv(Tensor *inputs, Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -430,7 +525,7 @@ void inferSmallConv(Tensor *inputs, Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferGroupConv(Tensor *out, BackendKind kind) {
+void inferGroupConv(Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -470,7 +565,7 @@ void inferGroupConv(Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferNonSquarePaddingConv(Tensor *out, BackendKind kind) {
+void inferNonSquarePaddingConv(Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -489,7 +584,7 @@ void inferNonSquarePaddingConv(Tensor *out, BackendKind kind) {
   auto *filterTensor = bindings.allocate(filter);
   auto FH = filterTensor->getHandle();
   for (size_t i = 0; i < 128; i++)
-    for (size_t j = 0; j < 16; j++) {
+    for (size_t j = 0; j < 32; j++) {
       FH.at({i, 0, 0, j}) = (i + j) / 100.0;
     }
   auto *zeroBias =
@@ -509,7 +604,7 @@ void inferNonSquarePaddingConv(Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferNonSquareKernelConv(Tensor *out, BackendKind kind) {
+void inferNonSquareKernelConv(Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -549,7 +644,7 @@ void inferNonSquareKernelConv(Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferNonSquareStrideConv(Tensor *out, BackendKind kind) {
+void inferNonSquareStrideConv(Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -589,7 +684,7 @@ void inferNonSquareStrideConv(Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferConvDKKC8(Tensor *out, BackendKind kind) {
+void inferConvDKKC8(Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -606,6 +701,7 @@ void inferConvDKKC8(Tensor *out, BackendKind kind) {
   auto *filter = mod.createPlaceholder(ElemKind::FloatTy, {192, 3, 3, 32},
                                        "filter", false);
   auto *filterTensor = bindings.allocate(filter);
+  filterTensor->zero();
   auto FH = filterTensor->getHandle();
   for (size_t i = 0; i < 192; i++)
     for (size_t j = 0; j < 3; j++)
@@ -631,7 +727,7 @@ void inferConvDKKC8(Tensor *out, BackendKind kind) {
 }
 
 void trainSoftMaxNet(Tensor *inputs, Tensor *weights, Tensor *bias,
-                     Tensor *selected, Tensor *out, BackendKind kind) {
+                     Tensor *selected, Tensor *out, llvm::StringRef kind) {
   ExecutionEngine EE(kind);
   TrainingConfig TC;
   PlaceholderBindings bindings;
@@ -667,7 +763,7 @@ void trainSoftMaxNet(Tensor *inputs, Tensor *weights, Tensor *bias,
 }
 
 void inferTanhConcatNet(Tensor *input1, Tensor *input2, Tensor *input3,
-                        Tensor *out, BackendKind kind) {
+                        Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -691,7 +787,7 @@ void inferTanhConcatNet(Tensor *input1, Tensor *input2, Tensor *input3,
   out->assign(resultTensor);
 }
 
-void inferBasicConvNet(Tensor *inputs, Tensor *out, BackendKind kind,
+void inferBasicConvNet(Tensor *inputs, Tensor *out, llvm::StringRef kind,
                        size_t convDepth) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
@@ -738,7 +834,7 @@ FunctionTensorPair createAndInitBasicFCNet(PlaceholderBindings &bindings,
   return std::make_pair(F, resultTensor);
 }
 
-void inferMixedNet(Tensor *inputs, Tensor *out, BackendKind kind) {
+void inferMixedNet(Tensor *inputs, Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -770,7 +866,7 @@ void inferMixedNet(Tensor *inputs, Tensor *out, BackendKind kind) {
 }
 
 void inferComplexNet1(Tensor *inputs1, Tensor *inputs2, Tensor *inputs3,
-                      Tensor *inputs4, Tensor *out, BackendKind kind) {
+                      Tensor *inputs4, Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -824,7 +920,7 @@ static void initConv(PlaceholderBindings &bindings, ConvolutionNode *C,
 } // namespace
 
 void inferTinyResnet(Tensor *input, Tensor *out, std::vector<Tensor> &weights,
-                     BackendKind kind) {
+                     llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -855,7 +951,7 @@ void inferTinyResnet(Tensor *input, Tensor *out, std::vector<Tensor> &weights,
   out->assign(resultTensor);
 }
 
-void inferExtract3D(Tensor *input, Tensor *out, BackendKind kind) {
+void inferExtract3D(Tensor *input, Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();
@@ -888,7 +984,7 @@ void inferExtract3D(Tensor *input, Tensor *out, BackendKind kind) {
   out->assign(resultTensor);
 }
 
-void inferMaxSplat(Tensor *input, Tensor *out, BackendKind kind) {
+void inferMaxSplat(Tensor *input, Tensor *out, llvm::StringRef kind) {
   PlaceholderBindings bindings;
   ExecutionEngine EE(kind);
   auto &mod = EE.getModule();

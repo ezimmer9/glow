@@ -33,8 +33,6 @@ InterpreterFunction::~InterpreterFunction() {
     delete p.second;
   }
   constants_.clear();
-
-  tearDownRuns();
 }
 
 void InterpreterFunction::collectConstants(const Module *module) {
@@ -51,13 +49,14 @@ void InterpreterFunction::collectConstants(const Module *module) {
   }
 }
 
-void InterpreterFunction::execute(ExecutionContext *context) {
+llvm::Error InterpreterFunction::execute(ExecutionContext *context) {
   BoundInterpreterFunction boundFunc(constants_);
-  boundFunc.execute(F_.get(), context);
+  auto res = boundFunc.execute(F_.get(), context);
   {
-    auto ev = context->scopedEvent("processInstrumentation");
+    TRACE_EVENT_SCOPE(context, TraceLevel::RUNTIME, "processInstrumentation");
     translateTraceEvents(context);
   }
+  return res;
 }
 
 void InterpreterFunction::translateTraceEvents(
@@ -69,8 +68,7 @@ void InterpreterFunction::translateTraceEvents(
 
   TraceContext *traceContext = context->getTraceContext();
 
-  if (!traceContext || traceContext->getTraceLevel() == TraceLevel::NONE ||
-      traceContext->getTraceLevel() == TraceLevel::RUNTIME) {
+  if (!traceContext || !traceContext->shouldLog(TraceLevel::OPERATOR)) {
     return;
   }
 
@@ -83,11 +81,26 @@ void InterpreterFunction::translateTraceEvents(
     assert(backingTensor);
 
     for (const TraceInfo::Event &event : backing.second) {
-      uint64_t ts{0};
-      memcpy(&ts,
-             backingTensor->getUnsafePtr() + (event.index * traceInfo.dataSize),
-             traceInfo.dataSize);
-      traceEvents.push_back({event.name, ts, event.type, tid});
+      // If it's a complete event: grab both timestamps.
+      if (event.type == TraceEvent::CompleteType) {
+        uint64_t start{0}, end{0};
+        memcpy(&start,
+               backingTensor->getUnsafePtr() +
+                   (event.startIndex * traceInfo.dataSize),
+               traceInfo.dataSize);
+        memcpy(&end,
+               backingTensor->getUnsafePtr() +
+                   (event.endIndex * traceInfo.dataSize),
+               traceInfo.dataSize);
+        traceEvents.push_back({event.name, start, end - start, tid});
+      } else {
+        uint64_t ts{0};
+        memcpy(&ts,
+               backingTensor->getUnsafePtr() +
+                   (event.startIndex * traceInfo.dataSize),
+               traceInfo.dataSize);
+        traceEvents.push_back({event.name, ts, event.type, tid});
+      }
     }
   }
 }
@@ -164,10 +177,27 @@ void BoundInterpreterFunction::deleteTensor(const Value *v) {
   tensors_.erase(it);
 }
 
-void BoundInterpreterFunction::execute(IRFunction *F,
-                                       ExecutionContext *context) {
+llvm::Error BoundInterpreterFunction::execute(IRFunction *F,
+                                              ExecutionContext *context) {
   {
-    auto ev = context->scopedEvent("registerTensors");
+    TRACE_EVENT_SCOPE(context, TraceLevel::RUNTIME, "registerTensors");
+
+    // Find all virtually padded tensors so they can be replaced.
+    std::vector<Placeholder *> virtualPadded;
+    for (auto &ph : context->getPlaceholderBindings()->pairs()) {
+      if (ph.second->getUnpaddedSizeInBytes() < ph.second->getSizeInBytes()) {
+        virtualPadded.push_back(ph.first);
+      }
+    }
+    // Replace all virtually padded tensors with real padding tensors.
+    for (auto &ph : virtualPadded) {
+      auto oldTensor = context->getPlaceholderBindings()->get(ph);
+      Tensor paddedTensor(oldTensor->getType());
+      memcpy(paddedTensor.getUnsafePtr(), oldTensor->getUnsafePtr(),
+             oldTensor->getUnpaddedSizeInBytes());
+      context->getPlaceholderBindings()->erase(ph);
+      context->getPlaceholderBindings()->insert(ph, std::move(paddedTensor));
+    }
     // Register the concrete tensors that back the placeholder tensors.
     for (auto &ph : context->getPlaceholderBindings()->pairs()) {
       auto *w = F->getWeightForNode(ph.first);
@@ -199,11 +229,14 @@ void BoundInterpreterFunction::execute(IRFunction *F,
   }
 
   {
-    auto ev = context->scopedEvent("eraseTensors");
+
+    TRACE_EVENT_SCOPE(context, TraceLevel::RUNTIME, "eraseTensors");
     // Remove the concrete tensors that back the placeholder tensors.
     for (auto &ph : context->getPlaceholderBindings()->pairs()) {
       auto *w = F->getWeightForNode(ph.first);
       externalTensors_.erase(w);
     }
   }
+
+  return llvm::Error::success();
 }

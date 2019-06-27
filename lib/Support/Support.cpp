@@ -17,10 +17,43 @@
 #include "glow/Support/Support.h"
 #include "llvm/Support/Debug.h"
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/YAMLParser.h"
+#include "llvm/Support/YAMLTraits.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <cctype>
 #include <cstdarg>
 #include <sstream>
 #include <string>
+
+namespace llvm {
+namespace yaml {
+template <> struct BlockScalarTraits<glow::MultiLineStr> {
+  static void output(const glow::MultiLineStr &Value, void *Ctxt,
+                     llvm::raw_ostream &OS) {
+    OS << Value.str;
+  }
+
+  static StringRef input(StringRef Scalar, void *Ctxt,
+                         glow::MultiLineStr &Value) {
+    Value.str = Scalar.str();
+    return StringRef();
+  }
+};
+
+template <> struct MappingTraits<glow::DeviceConfigHelper> {
+  static void mapping(IO &io, glow::DeviceConfigHelper &info) {
+    io.mapRequired("name", info.name_);
+    io.mapRequired("backendName", info.backendName_);
+    io.mapRequired("parameters", info.parameters_);
+  }
+};
+
+} // end namespace yaml
+} // end namespace llvm
+
+LLVM_YAML_IS_SEQUENCE_VECTOR(glow::DeviceConfigHelper);
 
 namespace glow {
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, void *ptr) {
@@ -117,4 +150,33 @@ std::string legalizeName(llvm::StringRef name) {
   return legalName;
 }
 
+/// \returns the color based on \p index which is used in dot file.
+const char *getDotFileNodeColor(size_t index) {
+  static const char *colorNames[] = {
+      "AliceBlue",      "CadetBlue1",   "Coral",      "DarkOliveGreen1",
+      "DarkSeaGreen1",  "GhostWhite",   "Khaki1",     "LavenderBlush1",
+      "LemonChiffon1",  "LightSkyBlue", "MistyRose1", "MistyRose2",
+      "PaleTurquoise2", "PeachPuff1",   "PowderBlue", "Salmon",
+      "Thistle1",       "Thistle3",     "Wheat1",     "Yellow2",
+  };
+  unsigned arrayLen = sizeof(colorNames) / sizeof(colorNames[0]);
+  return colorNames[index % arrayLen];
+}
+
+std::vector<DeviceConfigHelper>
+deserializeDeviceConfigFromYaml(llvm::StringRef fileName) {
+  std::vector<DeviceConfigHelper> result;
+  llvm::outs() << fileName << "\n";
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> text =
+      llvm::MemoryBuffer::getFileAsStream(fileName);
+  assert(!text.getError() && "Unable to open file");
+
+  std::unique_ptr<llvm::MemoryBuffer> buffer = std::move(*text);
+  llvm::yaml::Input yin(buffer->getBuffer());
+  yin >> result;
+
+  assert(!yin.error() && "Error reading yaml file");
+
+  return result;
+}
 } // namespace glow

@@ -23,6 +23,7 @@
 #include "glow/Graph/Utils.h"
 #include "glow/IR/IR.h"
 #include "glow/IR/Instrs.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/FileSystem.h"
@@ -89,7 +90,8 @@ TEST(Graph, simpleTestConv) {
   F->dump();
   auto filePath = F->dumpDAG();
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
   ::optimize(F, CompilationMode::Train);
   M.generateIR(backend);
   M.dump();
@@ -113,7 +115,8 @@ TEST(Graph, simpleTestConv3D) {
   F->dump();
   auto filePath = F->dumpDAG();
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
   ::optimize(F, CompilationMode::Train);
   M.generateIR(backend);
   M.dump();
@@ -138,7 +141,8 @@ TEST(Graph, simpleTestConvCustomLower) {
   F->dump();
   auto filePath = F->dumpDAG();
   auto backend = MockBackendCustomIRGen();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
   ::optimize(F, CompilationMode::Train);
   M.generateIR(MockBackendCustomIRGen());
   M.dump();
@@ -153,6 +157,84 @@ TEST(Graph, simpleTestConvCustomLower) {
 
   EXPECT_EQ(customHappened, true);
   llvm::sys::fs::remove(filePath);
+}
+
+/// Test lowering groupwise quantized convolution expressed using
+/// ChannelwiseQuantizedConvNode to multiple regular quantized convolutions.
+TEST(Graph, ConvChannelwiseQuantizedLower) {
+  Module M;
+  Function *F = M.createFunction("F");
+
+  constexpr size_t groups = 2;
+  constexpr size_t depth = 4;
+  constexpr size_t inputChannels = 4;
+
+  // Expect NHWC.
+  Node *inputPH = M.createPlaceholder(
+      ElemKind::Int8QTy, {1, 10, 10, inputChannels}, /* scale */ 1.0,
+      /* offset */ 0, "input", true);
+
+  Tensor filterTensor(ElemKind::Int8QTy, {depth, 1, 1, inputChannels / groups},
+                      /* scale */ 1.0,
+                      /* offset */ 0);
+  filterTensor.init(Tensor::InitKind::Broadcast, 1, M.getPRNG());
+  Constant *filter = M.createConstant("filter", filterTensor);
+
+  Tensor biasTensor(ElemKind::FloatTy, {depth});
+  biasTensor.init(Tensor::InitKind::Broadcast, 2, M.getPRNG());
+  Constant *bias = M.createConstant("bias", biasTensor);
+
+  Tensor scalesTensor(ElemKind::FloatTy, {groups});
+  scalesTensor.getHandle<float>().raw(0) = 1.0;
+  scalesTensor.getHandle<float>().raw(1) = 3.0;
+  Constant *scales = M.createConstant("scales", scalesTensor);
+
+  Tensor offsetsTensor(ElemKind::Int32ITy, {groups});
+  offsetsTensor.getHandle<int32_t>().raw(0) = 2;
+  offsetsTensor.getHandle<int32_t>().raw(1) = 4;
+  Constant *offsets = M.createConstant("offsets", offsetsTensor);
+
+  auto *outQTy = M.uniqueType(glow::ElemKind::Int8QTy, {1, 10, 10, depth},
+                              /* scale */ 1.5, /* offset */ 6);
+
+  auto *channelwiseQuantizedConvNode = F->createChannelwiseQuantizedConv(
+      "channelwise_qconv", inputPH, filter, bias, scales, offsets, outQTy,
+      /* kernels */ {1, 1},
+      /* strides */ {1, 1},
+      /* pads */ {0, 0, 0, 0},
+      /* group */ groups);
+
+  SaveNode *saveNode = F->createSave("save", channelwiseQuantizedConvNode);
+
+  auto backend = MockBackend();
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
+
+  // Now verify the lowered graph.
+
+  auto concatNode = llvm::dyn_cast<ConcatNode>(saveNode->getInput().getNode());
+  ASSERT_TRUE(concatNode != nullptr);
+
+  auto concatInputs = concatNode->getInputs();
+  EXPECT_EQ(concatInputs.size(), groups) << "Should have one conv per group";
+
+  for (size_t i = 0; i < concatInputs.size(); ++i) {
+    auto convNode = llvm::dyn_cast<ConvolutionNode>(concatInputs[i].getNode());
+    ASSERT_TRUE(concatNode != nullptr);
+    // Check that each conv has the expected filter qparams.
+    auto *filterTy = convNode->getFilter().getType();
+    ASSERT_TRUE(filterTy != nullptr);
+    EXPECT_TRUE(filterTy->isQuantizedType());
+    EXPECT_EQ(filterTy->getScale(), float(1 + 2 * i));
+    EXPECT_EQ(filterTy->getOffset(), 2 + 2 * i);
+
+    // Check that each conv has the expected output qparams.
+    auto *outTy = convNode->getType(ConvolutionNode::ResultIdx);
+    ASSERT_TRUE(outTy != nullptr);
+    EXPECT_TRUE(outTy->isQuantizedType());
+    EXPECT_EQ(outTy->getScale(), 1.5);
+    EXPECT_EQ(outTy->getOffset(), 6);
+  }
 }
 
 /// Check that we can create convolution with float16.
@@ -170,7 +252,8 @@ TEST(Graph, float16Conv) {
   EXPECT_EQ(conv->getBias().getElementType(), ElemKind::Float16Ty);
 
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
 
   IRFunction M(F);
 
@@ -203,7 +286,8 @@ TEST(Graph, float16Conv3D) {
   EXPECT_EQ(conv->getBias().getElementType(), ElemKind::Float16Ty);
 
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
 
   IRFunction M(F);
 
@@ -238,7 +322,8 @@ TEST(Graph, float16BatchNorm) {
   EXPECT_EQ(BN->getVar().getElementType(), ElemKind::Float16Ty);
 
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
 
   EXPECT_TRUE(std::all_of(
       F->getNodes().begin(), F->getNodes().end(), [](const Node &node) -> bool {
@@ -376,7 +461,8 @@ TEST(Graph, simpleTestFC) {
   F->dump();
   auto filePath = F->dumpDAG();
   auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
+  CompilationContext cctx;
+  lower(F, cctx, &backend);
   ::optimize(F, CompilationMode::Train);
   M.generateIR(backend);
   M.dump();
@@ -409,19 +495,21 @@ TEST(Graph, QuantizationProfileNodes) {
   F->createSave("save", O);
   F->createSave("save", C);
 
-  // Simulate actual usage.
-  ::optimize(F, CompilationMode::Infer);
-  ::glow::profileQuantization(bindings, F);
-  auto backend = MockBackend();
-  lower(F, /* loweredMap */ nullptr, &backend);
-  ::optimize(F, CompilationMode::Infer);
+  LoweredInfoMap loweredMapForProf;
+  CompilationContext cctx{&bindings, &loweredMapForProf};
+  cctx.precisionConfig.quantMode = QuantizationMode::Profile;
+  std::unique_ptr<Backend> backend(createBackend("Interpreter"));
+  EXIT_ON_ERR(::optimizeFunction(F, *backend, cctx));
 
   size_t numberOfProfileNodes =
       std::count_if(F->getNodes().begin(), F->getNodes().end(), [](Node &node) {
         return llvm::isa<QuantizationProfileNode>(&node);
       });
 
-  EXPECT_EQ(10, numberOfProfileNodes);
+  // 1 from A
+  // 8 from two lowered FCs: MM, BA, weight PH, bias PH
+  // 2 from RELU (lowered to Max+Splat)
+  EXPECT_EQ(11, numberOfProfileNodes);
 }
 
 TEST(Graph, simpleQuant) {
@@ -658,7 +746,7 @@ TEST(Graph, nodesWithPredicates) {
 }
 
 // Return the number of ConvolutionNode after lower.
-unsigned getConvNodeSize(BackendKind kind) {
+unsigned getConvNodeSize(llvm::StringRef kind) {
   Module mod;
   Function *F = mod.createFunction("main");
   IRFunction M(F);
@@ -669,7 +757,8 @@ unsigned getConvNodeSize(BackendKind kind) {
   F->createSave("save", CN);
 
   std::unique_ptr<Backend> backend(createBackend(kind));
-  lower(F, /* loweredMap */ nullptr, backend.get());
+  CompilationContext cctx;
+  lower(F, cctx, backend.get());
 
   unsigned count = 0;
   for (auto &n : F->getNodes()) {
@@ -678,7 +767,7 @@ unsigned getConvNodeSize(BackendKind kind) {
     }
   }
 
-  if (kind == BackendKind::Interpreter) {
+  if (kind == "Interpreter") {
     EXPECT_EQ(count, 1);
   }
 
@@ -688,16 +777,16 @@ unsigned getConvNodeSize(BackendKind kind) {
 // Check the unrolling grouped convolution opt status:
 // -- disabled for Interpreter, CPU and OpenCL backend,
 TEST(Graph, disableUnrollingGroupConv) {
-  unsigned numberOfNodesInterpreter = getConvNodeSize(BackendKind::Interpreter);
+  unsigned numberOfNodesInterpreter = getConvNodeSize("Interpreter");
   (void)numberOfNodesInterpreter;
 
 #ifdef GLOW_WITH_CPU
-  unsigned numberOfNodesCPU = getConvNodeSize(BackendKind::CPU);
+  unsigned numberOfNodesCPU = getConvNodeSize("CPU");
   EXPECT_EQ(numberOfNodesCPU, numberOfNodesInterpreter);
 #endif // GLOW_WITH_CPU
 
 #ifdef GLOW_WITH_OPENCL
-  unsigned numberOfNodesOpenCL = getConvNodeSize(BackendKind::OpenCL);
+  unsigned numberOfNodesOpenCL = getConvNodeSize("OpenCL");
   EXPECT_EQ(numberOfNodesOpenCL, numberOfNodesInterpreter);
 #endif // GLOW_WITH_OPENCL
 }
@@ -1242,6 +1331,19 @@ TEST(Graph, verifyConstantNoWriters) {
   EXPECT_FALSE(M.verify());
 }
 
+TEST(Graph, typeUnsafeReplaceAllUsesOfWith) {
+  Module M;
+  auto *F = M.createFunction("main");
+
+  auto *LHS = M.createPlaceholder(ElemKind::FloatTy, {3, 4}, "A", false);
+  auto *RHS = M.createPlaceholder(ElemKind::FloatTy, {4, 5}, "B", false);
+  auto *FC = F->createMatMul("fc", LHS, RHS);
+  F->createSave("save", FC);
+
+  auto newLHS = M.createPlaceholder(ElemKind::FloatTy, {10, 10}, "A", false);
+  LHS->getOutput().typeUnsafeReplaceAllUsesOfWith(newLHS);
+}
+
 /// Check that the verifier will complain if a constant and its
 /// underlying tensor have mismatching types.
 /// Here the constant is updated but not the tensor.
@@ -1266,9 +1368,91 @@ TEST(Graph, verifyConstantTensorTypeMatchesTensorTypeChanged) {
   auto *input = M.createConstant(ElemKind::FloatTy, {5}, "input");
   // Fresh constant should verify just fine.
   EXPECT_TRUE(input->verify());
-  input->getPayload().convertToType(ElemKind::Float16Ty);
+  input->getPayloadMutable().convertToType(ElemKind::Float16Ty);
 
   EXPECT_FALSE(input->verify());
+}
+
+/// Check that Constants backed by unowned Tensors are in fact unowned until
+/// a mutable reference to their payload is obtained at which point the backing
+/// Tensor is copied and becomes owned.
+TEST(Graph, verifyConstantWithUnownedTensorCopiesOnWrite) {
+  Module M;
+
+  Tensor originalT(ElemKind::FloatTy, {3});
+  Tensor unownedT = originalT.getUnowned({3});
+
+  auto originalH = originalT.getHandle();
+
+  for (size_t i = 0; i < originalT.size(); i++) {
+    originalH.raw(i) = i;
+  }
+
+  // Both Tensors should have the same underlying memory because unownedT shares
+  // originalT's memory.
+  EXPECT_EQ(originalT.getUnsafePtr(), unownedT.getUnsafePtr());
+
+  Constant *originalC = M.createConstant("original", std::move(originalT));
+  Constant *unownedC = M.createConstant("unowned", std::move(unownedT));
+
+  const Tensor &originalCT = originalC->getPayload();
+  const Tensor &unownedCT = unownedC->getPayload();
+
+  const auto originalCTH = originalCT.getHandle();
+  const auto unownedCTH = unownedCT.getHandle();
+
+  ASSERT_EQ(originalCTH.size(), unownedCTH.size());
+
+  // Both Constants should have the same values because their Tensors have the
+  // same underlying memory.
+  for (size_t i = 0; i < originalCTH.size(); i++) {
+    EXPECT_EQ(i, originalCTH.raw(i));
+    EXPECT_EQ(i, unownedCTH.raw(i));
+  }
+
+  Tensor &originalCTM = originalC->getPayloadMutable();
+  auto originalCTMH = originalCTM.getHandle();
+
+  // Bump up the value in the original Constant, this change should be
+  // reflected in the unowned Constant as well.
+  for (size_t i = 0; i < originalCTMH.size(); i++) {
+    originalCTMH.raw(i) += 1;
+  }
+
+  // After changing the values in the original Constant, we should see an update
+  // in the values of the unowned Constant because they share the same
+  // underlying memory.
+  for (size_t i = 0; i < unownedCTH.size(); i++) {
+    EXPECT_EQ(unownedCTH.raw(i), i + 1);
+  }
+
+  Tensor &unownedCTM = unownedC->getPayloadMutable();
+  auto unownedCTMH = unownedCTM.getHandle();
+
+  ASSERT_EQ(originalCTH.size(), unownedCTMH.size());
+
+  // After getting a mutable reference to the unowned Constant's payload, the
+  // underlying memory should have been copied but should still contain the same
+  // values as it did previously at this point.
+  EXPECT_NE(unownedCTM.getUnsafePtr(), originalCT.getUnsafePtr());
+  for (size_t i = 0; i < unownedCTMH.size(); i++) {
+    EXPECT_EQ(unownedCTMH.raw(i), i + 1);
+  }
+
+  // Bump up the value in the original Constant again, this change should not be
+  // reflected in the unowned Constant now because at this point, after a
+  // mutable reference to its payload has been obtained, it should have it's own
+  // memory.
+  for (size_t i = 0; i < originalCTMH.size(); i++) {
+    originalCTMH.raw(i) += 1;
+  }
+
+  // Now that the unowned Constant's payload has been obtained as mutable, it
+  // should have been copied and thus have its own memory and changes to the
+  // original constant should not be reflected in the unowned Constant.
+  for (size_t i = 0; i < unownedCTMH.size(); i++) {
+    EXPECT_EQ(unownedCTMH.raw(i), i + 1);
+  }
 }
 
 /// Check that hooking an intermediate node works.
@@ -1526,7 +1710,8 @@ TEST(Graph, GroupTestConvNoLower) {
   // Now lower, but prevent ConvolutionNodeKinds from being lowered.
   KindSet doNotLower;
   doNotLower.insert(Kinded::Kind::ConvolutionNodeKind);
-  lower(F, /* loweredMap */ nullptr, &backend, doNotLower);
+  CompilationContext cctx;
+  lower(F, cctx, &backend, doNotLower);
 
   {
     // Now have lowered but should still have a single Conv node with group = 8.
@@ -1586,4 +1771,76 @@ TEST(Graph, GetOutputSaveTest) {
   FoundNode = glow::getOutputSave(F2, O);
   EXPECT_NE(nullptr, FoundNode);
   EXPECT_EQ(SN2, FoundNode);
+}
+
+/// Check if dump functions work for Node, Function and Module.
+TEST(Graph, testDumpStructure) {
+  Module MD;
+  Function *F = MD.createFunction("F");
+  IRFunction M(F);
+  PlaceholderBindings bindings;
+  Node *K = MD.createPlaceholder(ElemKind::FloatTy, {4, 320, 200, 100, 3},
+                                 "input", true);
+  // Test Node
+  std::string storageN1;
+  llvm::raw_string_ostream osN1(storageN1);
+  K->dump(osN1);
+  std::string mesN = K->toString();
+  std::string expectMes = R"(Placeholder
+name : "input"
+output : float<4 x 320 x 200 x 100 x 3>
+users : 0
+trainable : 1
+)";
+  EXPECT_EQ(mesN, expectMes);
+  EXPECT_EQ(mesN, osN1.str());
+  std::string storageN2;
+  llvm::raw_string_ostream osN2(storageN2);
+  osN2 << K;
+  EXPECT_EQ(mesN, osN2.str());
+  // Test Function
+  Placeholder *I =
+      MD.createPlaceholder(ElemKind::FloatTy, {10, 10}, "input", true);
+  Function *F2 = MD.createFunction("F2");
+  F2->createTopK("topk", I, 3);
+  std::string storageF1;
+  llvm::raw_string_ostream osF1(storageF1);
+  F2->dump(osF1);
+  std::string mesF = F2->toString();
+  std::string expectMesF = R"(Graph structure F2:
+TopK
+name : topk
+Input : float<10 x 10>
+K : 3
+users : 0
+Values : float<10 x 3>
+Indices : index64<10 x 3>
+)";
+  EXPECT_EQ(mesF, expectMesF);
+  EXPECT_EQ(mesF, osF1.str());
+  std::string storageF2;
+  llvm::raw_string_ostream osF2(storageF2);
+  osF2 << F2;
+  EXPECT_EQ(mesF, osF2.str());
+  // Test Module
+  MD.createConstant(ElemKind::FloatTy, {1, 1}, "dummy");
+  std::string storageM1;
+  llvm::raw_string_ostream osM1(storageM1);
+  MD.dump(osM1);
+  std::string mesM = MD.toString();
+  std::string expectMesM = R"(Module structure:
+Constant
+name : "dummy"
+output : float<1 x 1>
+users : 0
+
+Function:F
+Function:F2
+)";
+  EXPECT_EQ(mesM, expectMesM);
+  EXPECT_EQ(mesM, osM1.str());
+  std::string storageM2;
+  llvm::raw_string_ostream osM2(storageM2);
+  osM2 << MD;
+  EXPECT_EQ(mesM, osM2.str());
 }

@@ -684,6 +684,47 @@ static size_t get_bin(size_t nBins, float binWidth, float minValue,
           : MIN(static_cast<size_t>((value - minValue) / binWidth), nBins - 1);
   return result;
 }
+
+template <typename T>
+static void
+libjit_space_to_depth_generic(const T *inPtr, T *outPtr, size_t blockSize,
+                              const size_t *inDims, const size_t *outDims) {
+  size_t inHeight = inDims[1];
+  size_t inWidth = inDims[2];
+  size_t inDepth = inDims[3];
+
+  size_t outBatch = outDims[0];
+  size_t outHeight = outDims[1];
+  size_t outWidth = outDims[2];
+  size_t outDepth = outDims[3];
+
+  for (size_t b = 0; b < outBatch; ++b) {
+    for (size_t h = 0; h < outHeight; ++h) {
+      for (size_t w = 0; w < outWidth; ++w) {
+        for (size_t c = 0; c < outDepth; ++c) {
+          // NHWC
+          // c +
+          // w * outDepth +
+          // h * outDepth * outWidth +
+          // b * outDepth * outWidth * outHeight
+          size_t outIndex = c + outDepth * (w + outWidth * (h + b * outHeight));
+
+          // Gets the block layer we are on
+          size_t blockDepthLayer = c / inDepth;
+          // every multiple of block size we reset to 0 offset
+          size_t iw = w * blockSize + blockDepthLayer % blockSize;
+          // every multiple of blockSize we start height traversal + 1
+          size_t ih = h * blockSize + blockDepthLayer / blockSize;
+          // at every multiple of inDepth index in to input depths resets to 0
+          size_t id = c % inDepth;
+
+          size_t inIndex = id + inDepth * (iw + inWidth * (ih + b * inHeight));
+          outPtr[outIndex] = inPtr[inIndex];
+        }
+      }
+    }
+  }
+}
 } // namespace
 
 extern "C" {
@@ -770,6 +811,7 @@ DEFINE_DATA_PARALLEL_KERNEL(libjit_element_mul_kernel_f, float,
 DEFINE_DATA_PARALLEL_KERNEL(libjit_element_pow_kernel_f, float,
                             pow(LHS[idx], RHS[idx]))
 DEFINE_DATA_PARALLEL_KERNEL(libjit_element_log_kernel_f, float, log(LHS[idx]))
+DEFINE_DATA_PARALLEL_KERNEL(libjit_element_exp_kernel_f, float, exp(LHS[idx]))
 DEFINE_DATA_PARALLEL_KERNEL_QUANTIZED(libjit_element_add_kernel_i8, int8_t,
                                       lhs + rhs)
 DEFINE_DATA_PARALLEL_KERNEL_QUANTIZED(libjit_element_sub_kernel_i8, int8_t,
@@ -780,6 +822,10 @@ DEFINE_DATA_PARALLEL_KERNEL_QUANTIZED(libjit_elementmin_kernel_i8, int8_t,
                                       MIN(lhs, rhs))
 DEFINE_DATA_PARALLEL_KERNEL_QUANTIZED_M(libjit_element_mul_kernel_i8, lhs *rhs)
 DEFINE_DATA_PARALLEL_KERNEL_QUANTIZED_M(libjit_element_div_kernel_i8, lhs / rhs)
+
+/// This is a variable used by Glow backends to determine the actual type used
+/// for size_t when libjit was compiled.
+size_t libjit_sizeTVar;
 
 int8_t libjit_element_cmp_eq_kernel_u(size_t idx, const size_t *LHS,
                                       const size_t *RHS) {
@@ -1048,6 +1094,16 @@ void libjit_gatherranges32_u(size_t *output, int32_t *lengths,
   libjit_gatherranges(output, lengths, data, ranges, numExamples, exampleSize);
 }
 
+void libjit_lengths_range_fill_i32(const int32_t *lengths, int32_t *output,
+                                   const size_t lengthsSize) {
+  size_t curIdx = 0;
+  for (size_t i = 0, e = lengthsSize; i < e; i++) {
+    for (int32_t j = 0, f = lengths[i]; j < f; j++) {
+      output[curIdx++] = j;
+    }
+  }
+}
+
 void libjit_scatterassign_f(float *data, const size_t *indices,
                             const float *slices, size_t numIndices,
                             size_t sliceSize) {
@@ -1071,6 +1127,22 @@ void libjit_lengths_to_ranges_i32(int32_t *ranges, const int32_t *lengths,
   }
 }
 
+void libjit_sparse_lengths_sum_f(float *dest, float *data, size_t *indices,
+                                 int32_t *lengths, size_t segments,
+                                 size_t lineSize) {
+  memset(dest, 0, segments * lineSize * sizeof(float));
+  size_t curIndex = 0;
+  for (size_t i = 0; i < segments; i++) {
+    for (int32_t j = 0; j < lengths[i]; j++) {
+      size_t line = indices[curIndex];
+      for (size_t k = 0; k < lineSize; k++) {
+        dest[i * lineSize + k] += data[line * lineSize + k];
+      }
+      curIndex++;
+    }
+  }
+}
+
 void libjit_sparse_lengths_weighted_sum_f(float *dest, float *data,
                                           float *weights, size_t *indices,
                                           int32_t *lengths, size_t segments,
@@ -1090,25 +1162,33 @@ void libjit_sparse_lengths_weighted_sum_f(float *dest, float *data,
 }
 
 void libjit_sparse_lengths_weighted_sum_grad_f(
-    const float *destGrad, float *dataGrad, const float *weights,
-    const size_t *indices, const int32_t *lengths, size_t segments,
-    size_t lineSize, size_t dataGradRawSize) {
+    const float *destGrad, float *dataGrad, float *weightsGrad,
+    const float *data, const float *weights, const size_t *indices,
+    const int32_t *lengths, size_t segments, size_t lineSize,
+    size_t dataGradRawSize) {
   // The data gradients not touched by this operation should
   // be 0, so set the entire buffer to 0 to start with.
   memset(dataGrad, 0, dataGradRawSize);
-  size_t curIndex = 0;
-  for (size_t i = 0; i < segments; i++) {
-    for (int32_t j = 0; j < lengths[i]; j++) {
-      // For each index in each segment, accumulate into the corresponding data
-      // gradient the product of the gradient of the result it was added to and
-      // the weight that it was multiplied by during the
-      // SparseLengthsWeightedSum operation.
+
+  for (size_t i = 0, curIndex = 0; i < segments; ++i) {
+    for (int32_t j = 0; j < lengths[i]; ++j, ++curIndex) {
+      // For each index in each segment:
+      //    1) accumulate into the corresponding data gradient the product of
+      //    the gradient of the result it was added to and the weight that it
+      //    was multiplied by during the SparseLengthsWeightedSum operation.
+      //
+      //    2) accumulate into each weight gradient the reduced sum of the
+      //    elementwise product of the result slice that the corresponding
+      //    weight produced and the input slice that the weight was multiplied
+      //    with.
+      float weightGrad = 0.0f;
       float weight = weights[curIndex];
       size_t line = indices[curIndex];
-      for (size_t k = 0; k < lineSize; k++) {
+      for (size_t k = 0; k < lineSize; ++k) {
         dataGrad[line * lineSize + k] += weight * destGrad[i * lineSize + k];
+        weightGrad += destGrad[i * lineSize + k] * data[line * lineSize + k];
       }
-      curIndex++;
+      weightsGrad[curIndex] = weightGrad;
     }
   }
 }
@@ -1559,6 +1639,12 @@ void libjit_transpose_u(const size_t *inW, size_t *outW, const size_t *idim,
   libjit_transpose_generic(inW, outW, idim, odim, shuffle, numDims);
 }
 
+void libjit_transpose_b(const bool *inW, bool *outW, const size_t *idim,
+                        const size_t *odim, const size_t *shuffle,
+                        size_t numDims) {
+  libjit_transpose_generic(inW, outW, idim, odim, shuffle, numDims);
+}
+
 void libjit_insert_tensor_f(float *tensor, float *slice, size_t *offset,
                             size_t *tensorDim, size_t *sliceDim,
                             size_t numDimsTensor, size_t numDimsSlice,
@@ -1607,6 +1693,19 @@ void libjit_insert_tensor_i8(int8_t *tensor, int8_t *slice, size_t *offset,
                        numDimsTensor, numDimsSlice, offsetDim, count, axis);
 }
 
+void libjit_space_to_depth_f(const float *inTensor, float *outTensor,
+                             size_t blockSize, const size_t *inDims,
+                             const size_t *outDims) {
+  libjit_space_to_depth_generic(inTensor, outTensor, blockSize, inDims,
+                                outDims);
+}
+
+void libjit_space_to_depth_i8(const int8_t *inTensor, int8_t *outTensor,
+                              size_t blockSize, const size_t *inDims,
+                              const size_t *outDims) {
+  libjit_space_to_depth_generic(inTensor, outTensor, blockSize, inDims,
+                                outDims);
+}
 __attribute__((noinline)) void
 libjit_dump_tensor(uint8_t *tensor, size_t *tensorDim, size_t numDimsTensor,
                    size_t elemKind, const char *name) {
@@ -1616,6 +1715,7 @@ libjit_dump_tensor(uint8_t *tensor, size_t *tensorDim, size_t numDimsTensor,
     FloatTy,       // 32-bit float type (float)
     Float16Ty,     // 16-bit float type (half, fp16)
     Int8QTy,       // 8-bit quantized type (int8_t)
+    UInt8QTy,      // unsigned 8-bit quantized type (uint8_t)
     Int16QTy,      // 16-bit quantized type (int16_t)
     Int32QTy,      // 32-bit quantized type (int32_t)
     Int32ITy,      // 32-bit index type (int32_t)

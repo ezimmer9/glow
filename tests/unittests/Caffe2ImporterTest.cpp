@@ -24,12 +24,48 @@
 #endif
 
 using namespace glow;
+/// Test loading of Elementwise Unary Ops floating point.
+static void testEltwiseUnaryOpFloat(std::string fileName,
+                                    llvm::ArrayRef<size_t> inputShape,
+                                    std::string input_name, float delta,
+                                    const std::function<float(float)> &op) {
+  ExecutionEngine EE{};
+  auto &mod = EE.getModule();
+  Function *F = mod.createFunction("main");
+  std::string NetDescFilename =
+      std::string(GLOW_DATA_PATH "tests/models/caffe2Models/") + fileName;
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/empty_init_net.pbtxt");
+
+  PlaceholderBindings bindings;
+  Placeholder *graphOutputVar;
+  Type input_type(ElemKind::FloatTy, inputShape);
+  Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
+                             {input_name.c_str()}, {&input_type}, *F);
+  graphOutputVar = EXIT_ON_ERR(caffe2LD.getSingleOutput());
+  auto PH = mod.getPlaceholderByName(input_name);
+  auto *inTensor = bindings.allocate(PH);
+  inTensor->getHandle().randomize(-10.0, 10.0, mod.getPRNG());
+  EE.compile(CompilationMode::Infer, F);
+  EE.run(bindings);
+  auto result = bindings.get(graphOutputVar)->getHandle();
+  auto inHandle = inTensor->getHandle();
+  ASSERT_TRUE(result.dims() == inputShape);
+  for (size_t i = 0; i < result.getType().size(); i++) {
+    EXPECT_NEAR(result.raw(i), op(inHandle.raw(i)), delta);
+  }
+}
+
+TEST(caffe2, importExp) {
+  testEltwiseUnaryOpFloat("exp_op_net.pbtxt", {1, 2, 4, 3}, "data", 0.002,
+                          [](float a) { return std::exp(a); });
+}
 
 /// Test loading conv op from a Caffe2 model.
 /// The input is N*C*H*W (1*1*3*3), the kernel is 2,
 /// stride is 1, pad is 1, group is 1.
 TEST(caffe2, importConv) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -42,7 +78,7 @@ TEST(caffe2, importConv) {
   PlaceholderBindings bindings;
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Tensor data;
     getNCHWData(&data, 1, 1, 3, 3);
@@ -71,7 +107,7 @@ TEST(caffe2, importConv) {
 /// The input is N*C*H*W (1*1*3*3), the kernel is 2,
 /// stride is 1, pad is 1, group is 1.
 TEST(caffe2, importConvRelu) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -84,7 +120,7 @@ TEST(caffe2, importConvRelu) {
   PlaceholderBindings bindings;
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Tensor data;
     getNCHWData(&data, 1, 1, 3, 3);
@@ -130,7 +166,7 @@ TEST(caffe2, importConvRelu) {
 /// The input is N*H*W*C (1*3*3*1), the kernel is 2,
 /// stride is 1, pad is 1, group is 1.
 TEST(caffe2, convNHWC) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -145,7 +181,7 @@ TEST(caffe2, convNHWC) {
   Tensor inputs(ElemKind::FloatTy, {1, 3, 3, 1});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -165,9 +201,99 @@ TEST(caffe2, convNHWC) {
   EXPECT_EQ(mod.getConstants().size(), 2);
 }
 
+/// Test loading ChannelwiseQuantizedConvolutionNode op from a Caffe2 model.
+/// The input is N*H*W*C (1*1*1*4), the kernel is 1,
+/// stride is 1, pad is 1, group is 2.
+TEST(caffe2, convGroupQuantized) {
+  ExecutionEngine EE{};
+  auto &mod = EE.getModule();
+  Function *F = mod.createFunction("main");
+
+  std::string NetDescFilename(
+      GLOW_DATA_PATH
+      "tests/models/caffe2Models/conv_group_quantized_pred_net.pbtxt");
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH
+      "tests/models/caffe2Models/conv_group_quantized_init_net.pbtxt");
+
+  Placeholder *output;
+  PlaceholderBindings bindings;
+
+  Tensor input(ElemKind::Int8QTy, {1, 1, 1, 4}, 1.0, 0);
+
+  // Destroy the loader after the graph is loaded since the following execution
+  // will not depend on anything from the loader.
+  {
+    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"input"},
+                               {&input.getType()}, *F);
+    output = EXIT_ON_ERR(caffe2LD.getSingleOutput());
+  }
+
+  // High level check on the content of the graph. We have 1
+  // ChannelwiseQuantizedConvolutionNode and 1 save.
+  EXPECT_EQ(F->getNodes().size(), 2);
+  auto *saveNode = getSaveNodeFromDest(output);
+  auto *groupwiseConv = llvm::dyn_cast<ChannelwiseQuantizedConvolutionNode>(
+      saveNode->getInput().getNode());
+  ASSERT_TRUE(groupwiseConv);
+
+  // Check params.
+  std::vector<unsigned> expectedKernelsAndStrides = {1, 1};
+  std::vector<unsigned> expectedPads = {1, 1, 1, 1};
+  EXPECT_EQ(groupwiseConv->getKernels(),
+            llvm::makeArrayRef(expectedKernelsAndStrides));
+  EXPECT_EQ(groupwiseConv->getStrides(),
+            llvm::makeArrayRef(expectedKernelsAndStrides));
+  EXPECT_EQ(groupwiseConv->getPads(), llvm::makeArrayRef(expectedPads));
+  EXPECT_EQ(groupwiseConv->getGroup(), 2);
+  EXPECT_EQ(groupwiseConv->getGroupwise(), true);
+
+  // Check constant inputs.
+  Constant *filterConstant =
+      llvm::dyn_cast<Constant>(groupwiseConv->getFilter().getNode());
+  Constant *biasConstant =
+      llvm::dyn_cast<Constant>(groupwiseConv->getBias().getNode());
+  Constant *scalesConstant =
+      llvm::dyn_cast<Constant>(groupwiseConv->getScales().getNode());
+  Constant *offsetsConstant =
+      llvm::dyn_cast<Constant>(groupwiseConv->getOffsets().getNode());
+
+  ASSERT_TRUE(filterConstant);
+  ASSERT_TRUE(biasConstant);
+  ASSERT_TRUE(scalesConstant);
+  ASSERT_TRUE(offsetsConstant);
+
+  const auto filterH = filterConstant->getPayload().getHandle<int8_t>();
+  const auto biasH = biasConstant->getPayload().getHandle<float>();
+  const auto scalesH = scalesConstant->getPayload().getHandle<float>();
+  const auto offsetsH = offsetsConstant->getPayload().getHandle<int32_t>();
+
+  for (size_t i = 0; i < filterH.size(); ++i) {
+    EXPECT_EQ(filterH.raw(i), i % 2);
+  }
+
+  for (size_t i = 0; i < biasH.size(); ++i) {
+    EXPECT_EQ(biasH.raw(i), 7);
+  }
+
+  for (size_t i = 0; i < scalesH.size(); ++i) {
+    EXPECT_EQ(scalesH.raw(i), 6);
+  }
+
+  for (size_t i = 0; i < offsetsH.size(); ++i) {
+    EXPECT_EQ(offsetsH.raw(i), 5);
+  }
+
+  // We have 2 placeholders: 1 input and 1 output.
+  EXPECT_EQ(mod.getPlaceholders().size(), 2);
+  // We have 4 constants: Bias, Weights, and Weights' separate scales and
+  // offsets.
+  EXPECT_EQ(mod.getConstants().size(), 4);
+}
+
 /// Test loading MaxPool with NHWC order input.
 TEST(caffe2, maxPoolNHWC) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -183,7 +309,7 @@ TEST(caffe2, maxPoolNHWC) {
   Tensor inputs(ElemKind::FloatTy, {1, 3, 3, 1});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -205,7 +331,7 @@ TEST(caffe2, maxPoolNHWC) {
 
 /// Test that loading MaxPool with legacy padding terminates early.
 TEST(caffe2, maxPoolLegacyPadding) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -230,7 +356,7 @@ TEST(caffe2, maxPoolLegacyPadding) {
 
 /// Test loading MaxPool with default NCHW order input.
 TEST(caffe2, maxPool) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -245,7 +371,7 @@ TEST(caffe2, maxPool) {
   Tensor inputs(ElemKind::FloatTy, {1, 3, 3, 1});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -274,7 +400,7 @@ TEST(caffe2, maxPool) {
 
 /// Test loading AvgPool with NHWC order input.
 TEST(caffe2, avgPoolNHWC) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -290,7 +416,7 @@ TEST(caffe2, avgPoolNHWC) {
   Tensor inputs(ElemKind::FloatTy, {1, 3, 3, 1});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -312,7 +438,7 @@ TEST(caffe2, avgPoolNHWC) {
 
 /// Test loading AveragePool with default NCHW order input.
 TEST(caffe2, avgPool) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -327,7 +453,7 @@ TEST(caffe2, avgPool) {
   Tensor inputs(ElemKind::FloatTy, {1, 3, 3, 1});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -365,7 +491,7 @@ TEST(caffe2, avgPool) {
 /// To fill the gap between the two, glow issues a reshape
 /// right after its concat.
 TEST(caffe2, concatAddAxis) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -385,7 +511,7 @@ TEST(caffe2, concatAddAxis) {
   inputs_1.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   inputs_2.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(
         NetDescFilename, NetWeightFilename,
@@ -443,7 +569,7 @@ TEST(caffe2, concatAddAxis) {
 
 /// Test loading a regular concat node.
 TEST(caffe2, concat) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -461,7 +587,7 @@ TEST(caffe2, concat) {
   inputs_1.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   inputs_2.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(
         NetDescFilename, NetWeightFilename,
@@ -521,7 +647,7 @@ TEST(caffe2, concat) {
 
 /// Test loading a batched matmul with transpose on RHS.
 TEST(caffe2, batchedMatmulRHS) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
   std::string NetDescFilename(
@@ -536,7 +662,7 @@ TEST(caffe2, batchedMatmulRHS) {
   inputs_0.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   inputs_1.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"inputs_0", "inputs_1"},
@@ -554,35 +680,29 @@ TEST(caffe2, batchedMatmulRHS) {
   EXPECT_EQ(mod.getPlaceholders().size(), 3);
   // Check that the graph has the expected shape,
   // starting from the output.
-  // Batched matmul with broadcasted RHS are lowered
-  // to a regular matmul, where LHS is reshaped from
-  // a 3D tensor to a flattened matrix.
   auto *saveNode = getSaveNodeFromDest(output);
-  auto *reshapeResult =
-      llvm::dyn_cast<ReshapeNode>(saveNode->getInput().getNode());
-  ASSERT_TRUE(reshapeResult);
-  auto *matmul =
-      llvm::dyn_cast<MatMulNode>(reshapeResult->getInput().getNode());
-  ASSERT_TRUE(matmul);
-  const size_t matmulDims[] = {30, 10};
-  EXPECT_EQ(matmul->dims(0), llvm::makeArrayRef(matmulDims));
-  auto *lhs = llvm::dyn_cast<ReshapeNode>(matmul->getLHS().getNode());
-  ASSERT_TRUE(lhs);
-  auto *lhsInput = lhs->getInput().getNode();
-  ASSERT_TRUE(llvm::isa<Placeholder>(lhsInput));
-  auto *transpose = llvm::dyn_cast<TransposeNode>(matmul->getRHS().getNode());
-  ASSERT_TRUE(transpose);
-  ASSERT_TRUE(llvm::isa<Placeholder>(transpose->getInput().getNode()));
+  auto *BMMN = llvm::dyn_cast<BatchMatMulNode>(saveNode->getInput().getNode());
+  ASSERT_TRUE(BMMN);
+  const size_t batchMatmulDims[] = {3, 10, 10};
+  EXPECT_EQ(BMMN->getResult().dims(), llvm::makeArrayRef(batchMatmulDims));
+  EXPECT_TRUE(llvm::isa<Placeholder>(BMMN->getLHS()));
+  auto *tileRHS = llvm::dyn_cast<TileNode>(BMMN->getRHS());
+  ASSERT_TRUE(tileRHS);
+  auto *reshapeRHS = llvm::dyn_cast<ReshapeNode>(tileRHS->getInput());
+  ASSERT_TRUE(reshapeRHS);
+  auto *transposeRHS = llvm::dyn_cast<TransposeNode>(reshapeRHS->getInput());
+  ASSERT_TRUE(transposeRHS);
+  EXPECT_TRUE(llvm::isa<Placeholder>(transposeRHS->getInput()));
   // Check that the last two dimensions are swapped.
   const unsigned_t shuffle[] = {1, 0};
-  EXPECT_EQ(transpose->getShuffle(), llvm::makeArrayRef(shuffle));
+  EXPECT_EQ(transposeRHS->getShuffle(), llvm::makeArrayRef(shuffle));
   // We don't actually check that the output is correct, because this
   // should be covered in the OperatorTest for MatMul already.
 }
 
 /// Test loading a parallel batched matmul.
 TEST(caffe2, parallelBatchedMatmulRHS) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
   std::string NetDescFilename(
@@ -597,7 +717,7 @@ TEST(caffe2, parallelBatchedMatmulRHS) {
   inputs_0.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   inputs_1.getHandle().randomize(-3.0, 3.0, mod.getPRNG());
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"inputs_0", "inputs_1"},
@@ -605,12 +725,9 @@ TEST(caffe2, parallelBatchedMatmulRHS) {
     output = EXIT_ON_ERR(caffe2LD.getSingleOutput());
   }
 
-  // Check that the shape of the output matches what Caffe2 expects.
-  std::vector<size_t> expectedDims = {3, 10, 10};
-  EXPECT_TRUE(output->dims().vec() == expectedDims);
   // High level check on the content of the graph.
-  // We have 6 slices, 3 matmuls, 1 concat, 7 reshapes, 1 save.
-  EXPECT_EQ(F->getNodes().size(), 18);
+  // We have a BatchMatMul and a Save.
+  EXPECT_EQ(F->getNodes().size(), 2);
   // With have 2 inputs and one outputs.
   EXPECT_EQ(mod.getPlaceholders().size(), 3);
   // Check that the graph has the expected shape,
@@ -618,51 +735,23 @@ TEST(caffe2, parallelBatchedMatmulRHS) {
   // Parallel Batched matmul is lowered to a sequence of slices, reshapes and
   // regular matmuls.
   auto *saveNode = getSaveNodeFromDest(output);
-  auto *reshapeResult =
-      llvm::dyn_cast<ReshapeNode>(saveNode->getInput().getNode());
-  ASSERT_TRUE(reshapeResult);
-  auto *concat =
-      llvm::dyn_cast<ConcatNode>(reshapeResult->getInput().getNode());
-  ASSERT_TRUE(concat);
-  for (size_t i = 0; i < 3; i++) {
-    auto *matmul = llvm::dyn_cast<MatMulNode>(concat->getNthInput(i).getNode());
-    ASSERT_TRUE(matmul);
-    const size_t matmulDims[] = {10, 10};
-    EXPECT_EQ(matmul->dims(0), llvm::makeArrayRef(matmulDims));
+  auto *BMMN = llvm::dyn_cast<BatchMatMulNode>(saveNode->getInput());
+  ASSERT_TRUE(BMMN);
 
-    const size_t sliceStart[] = {i, 0, 0};
-    // LHS
-    auto *lhsReshape = llvm::dyn_cast<ReshapeNode>(matmul->getLHS().getNode());
-    ASSERT_TRUE(lhsReshape);
-    const size_t lhsReshapeDims[] = {10, 7};
-    EXPECT_EQ(lhsReshape->getDims(), llvm::makeArrayRef(lhsReshapeDims));
-    auto *lhsSlice =
-        llvm::dyn_cast<SliceNode>(lhsReshape->getInput().getNode());
-    ASSERT_TRUE(lhsSlice);
-    EXPECT_EQ(lhsSlice->getStart(), llvm::makeArrayRef(sliceStart));
-    auto *lhsInput =
-        llvm::dyn_cast<Placeholder>(lhsSlice->getInput().getNode());
-    ASSERT_TRUE(lhsInput);
-    // RHS
-    auto *rhsReshape = llvm::dyn_cast<ReshapeNode>(matmul->getRHS().getNode());
-    ASSERT_TRUE(rhsReshape);
-    const size_t rhsReshapeDims[] = {7, 10};
-    EXPECT_EQ(rhsReshape->getDims(), llvm::makeArrayRef(rhsReshapeDims));
-    auto *rhsSlice =
-        llvm::dyn_cast<SliceNode>(rhsReshape->getInput().getNode());
-    ASSERT_TRUE(rhsSlice);
-    EXPECT_EQ(rhsSlice->getStart(), llvm::makeArrayRef(sliceStart));
-    auto *rhsInput =
-        llvm::dyn_cast<Placeholder>(rhsSlice->getInput().getNode());
-    ASSERT_TRUE(rhsInput);
-  }
+  const size_t lhsDims[] = {3, 10, 7};
+  EXPECT_EQ(BMMN->getLHS().dims(), llvm::makeArrayRef(lhsDims));
+  const size_t rhsDims[] = {3, 7, 10};
+  EXPECT_EQ(BMMN->getRHS().dims(), llvm::makeArrayRef(rhsDims));
+  const size_t resultDims[] = {3, 10, 10};
+  EXPECT_EQ(BMMN->getResult().dims(), llvm::makeArrayRef(resultDims));
+
   // We don't actually check that the output is correct, because this
   // should be covered in the OperatorTest for MatMul already.
 }
 
 /// Test loading a FC node : I * transpose(W) + B.
 TEST(caffe2, FC) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -674,7 +763,7 @@ TEST(caffe2, FC) {
   Placeholder *output;
   PlaceholderBindings bindings;
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Tensor inputs(ElemKind::FloatTy, {2, 3});
     inputs.getHandle() = {1, 2, 3, 4, 5, 6};
@@ -698,7 +787,8 @@ TEST(caffe2, FC) {
 
   // Check the numerical values of the weights and biases.
   {
-    const Constant *constant = mod.getConstantByName("weights");
+    // NOTE: this is weights1 because the weights constant was transposed
+    const Constant *constant = mod.getConstantByName("weights1");
     ASSERT_TRUE(constant);
     const Tensor &weights = constant->getPayload();
     const std::vector<size_t> expectedDimensions = {3, 4};
@@ -714,7 +804,7 @@ TEST(caffe2, FC) {
     }
   }
   {
-    const Constant *constant = mod.getConstantByName("biases");
+    const Constant *constant = mod.getConstantByName("bias");
     ASSERT_TRUE(constant);
     const Tensor &bias = constant->getPayload();
     const std::vector<size_t> expectedDimensions = {4};
@@ -735,7 +825,7 @@ TEST(caffe2, FC) {
 /// Test loading a FC node : I * transpose(W) + B, where I is need to be
 /// flatten.
 TEST(caffe2, FCWithFlatten) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -782,7 +872,7 @@ TEST(caffe2, FCWithFlatten) {
 
 /// Test loading a FCTransposed node: I * W + B
 TEST(caffe2, FCTransposed) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -796,7 +886,7 @@ TEST(caffe2, FCTransposed) {
   PlaceholderBindings bindings;
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Tensor inputs(ElemKind::FloatTy, {2, 3});
     inputs.getHandle() = {1, 2, 3, 4, 5, 6};
@@ -836,7 +926,7 @@ TEST(caffe2, FCTransposed) {
     }
   }
   {
-    const Constant *constant = mod.getConstantByName("biases");
+    const Constant *constant = mod.getConstantByName("bias");
     ASSERT_TRUE(constant);
     const Tensor &bias = constant->getPayload();
     const std::vector<size_t> expectedDimensions = {4};
@@ -856,7 +946,7 @@ TEST(caffe2, FCTransposed) {
 
 /// Test loading a FCTransposed node: I * W + B, where I is need to be flatten.
 TEST(caffe2, FCTransposedWithFlatten) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -906,7 +996,7 @@ TEST(caffe2, FCTransposedWithFlatten) {
 /// Test loading clip op from a Caffe2 model.
 /// Test with arg min = 20.0 max = 60.0
 TEST(caffe2, importClip) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -919,7 +1009,7 @@ TEST(caffe2, importClip) {
   Placeholder *output;
   Tensor inputs_0(ElemKind::FloatTy, {5, 5});
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs_0"},
                                {&inputs_0.getType()}, *F);
@@ -950,7 +1040,7 @@ TEST(caffe2, importClip) {
 /// min = std::numeric_limits<float>::lowest()
 /// max = std::numeric_limits<float>::max()
 TEST(caffe2, importClipDefault) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -964,7 +1054,7 @@ TEST(caffe2, importClipDefault) {
   Tensor inputs_0(ElemKind::FloatTy, {5, 5});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs_0"},
                                {&inputs_0.getType()}, *F);
@@ -992,7 +1082,7 @@ TEST(caffe2, importClipDefault) {
 
 /// Test loading a ReplaceNaN operator.
 TEST(caffe2, replaceNaN) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1006,7 +1096,7 @@ TEST(caffe2, replaceNaN) {
   Tensor input(ElemKind::FloatTy, {10, 10});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"input"},
                                {&input.getType()}, *F);
@@ -1036,7 +1126,7 @@ TEST(caffe2, replaceNaN) {
 
 /// Test loading a DotProduct operator with 1D inputs.
 TEST(caffe2, dotProduct1D) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1078,7 +1168,7 @@ TEST(caffe2, dotProduct1D) {
 
 // Test loading a DotProduct operator with 2D inputs.
 TEST(caffe2, dotProduct2D) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1125,7 +1215,7 @@ TEST(caffe2, dotProduct2D) {
 
 // Test loading a BatchBoxCox operator.
 TEST(caffe2, batchBoxCox) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1146,7 +1236,7 @@ TEST(caffe2, batchBoxCox) {
   Tensor lambda2(ElemKind::FloatTy, {kCols});
   Tensor O(ElemKind::FloatTy, {kRows, kCols});
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(
         NetDescFilename, NetWeightFilename, {"data", "lambda1", "lambda2"},
@@ -1246,7 +1336,7 @@ TEST(caffe2, batchBoxCox) {
 
 // Test loading a EQ operator with 1D inputs.
 TEST(caffe2, EQ1D) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1286,7 +1376,7 @@ TEST(caffe2, EQ1D) {
 
 // Test loading a LengthsToRanges operator.
 TEST(caffe2, LengthsToRanges) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1320,7 +1410,7 @@ TEST(caffe2, LengthsToRanges) {
 
 // Test loading Logit operator from a Caffe2 model.
 TEST(caffe2, Logit) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1357,7 +1447,7 @@ TEST(caffe2, Logit) {
 
 // Test loading a SparseToDense operator.
 TEST(caffe2, sparseToDense) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1379,7 +1469,7 @@ TEST(caffe2, sparseToDense) {
   Tensor dataToInferDim(ElemKind::FloatTy, {kMaxIndex, kRows, kCols});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(
         NetDescFilename, NetWeightFilename,
@@ -1409,7 +1499,7 @@ TEST(caffe2, sparseToDense) {
 }
 
 TEST(caffe2, SparseToDenseMask) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1455,14 +1545,14 @@ TEST(caffe2, SparseToDenseMask) {
   ASSERT_TRUE(N);
 
   // Check that no batch dimension was added because Lengths was not given.
-  EXPECT_TRUE(N->dims(0).equals({6, 10, 20, 30}));
+  EXPECT_TRUE(N->getResult().dims().equals({6, 10, 20, 30}));
   // Check that mask was read correctly.
   EXPECT_TRUE(N->getMask().equals({42, 100, 300, 1, 0, 312}));
 }
 
 /// Test loading NCHW2NHWC op.
 TEST(caffe2, testNCHW2NHWC) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1477,7 +1567,7 @@ TEST(caffe2, testNCHW2NHWC) {
   Tensor inputs(ElemKind::FloatTy, {1, 2, 3, 4});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"inputs"},
                                {&inputs.getType()}, *F);
@@ -1506,7 +1596,7 @@ TEST(caffe2, testNCHW2NHWC) {
 
 /// Test loading a LengthsSum operator.
 TEST(caffe2, lengthsSum) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1523,7 +1613,7 @@ TEST(caffe2, lengthsSum) {
   Tensor lengths(ElemKind::FloatTy, {5});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"data", "lengths"},
@@ -1582,14 +1672,47 @@ TEST(caffe2, gatherRanges) {
   EXPECT_TRUE(gatherRanges->getLengths().dims().equals({2}));
 }
 
+/// Test loading a LengthsRangeFill op.
+TEST(caffe2, LengthsRangeFill) {
+  ExecutionEngine EE;
+  auto &mod = EE.getModule();
+  auto *F = mod.createFunction("main");
+
+  std::string NetDescFilename(
+      GLOW_DATA_PATH
+      "tests/models/caffe2Models/lengths_range_fill_predict_net.pbtxt");
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/empty_init_net.pbtxt");
+
+  Placeholder *output;
+  Tensor lengths(ElemKind::Int32ITy, {3});
+
+  {
+    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename, {"lengths"},
+                               {&lengths.getType()}, *F);
+    output = EXIT_ON_ERR(caffe2LD.getOutputByName("result"));
+  }
+
+  // Verify structure: PH -> LengthsRangeFill -> Save -> PH.
+  ASSERT_EQ(mod.getPlaceholders().size(), 2);
+  ASSERT_EQ(F->getNodes().size(), 2);
+  auto *save = getSaveNodeFromDest(output);
+  auto *LRF = llvm::dyn_cast<LengthsRangeFillNode>(save->getInput().getNode());
+  ASSERT_TRUE(LRF);
+  EXPECT_TRUE(LRF->getLengths().dims().equals({3}));
+  EXPECT_EQ(LRF->getResult().dims().size(), 1);
+  // Proto specifies the max output size is 8.
+  EXPECT_TRUE(LRF->getResult().dims().equals({8}));
+}
+
 /// Verify that different fill types are loaded with the correct types.
 TEST(caffe2, tensorFillsTest) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
   std::string NetDescFilename(
-      GLOW_DATA_PATH "tests/models/caffe2Models/empty_predict_net.pbtxt");
+      GLOW_DATA_PATH "tests/models/caffe2Models/fill_test_predict_net.pbtxt");
   std::string NetWeightFilename(
       GLOW_DATA_PATH "tests/models/caffe2Models/fill_test_init_net.pbtxt");
 
@@ -1602,18 +1725,20 @@ TEST(caffe2, tensorFillsTest) {
     // Loaded protos must have at least one external output, so load an unused
     // output and type to satisfy it. It is named unused_output in
     // empty_predict_net.pbtxt.
-    Type unusedTy = Type(ElemKind::FloatTy, {1});
-    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
-                               {"unused_output"}, {&unusedTy}, *F);
-    tensorFillFloat = llvm::dyn_cast<Constant>(EXIT_ON_ERR(
-        caffe2LD.getNodeValueOrCreateConstantByName("tensor_fill_float")));
-    tensorIntFill = llvm::dyn_cast<Constant>(EXIT_ON_ERR(
-        caffe2LD.getNodeValueOrCreateConstantByName("tensor_int_fill")));
-    tensorInt64Fill = llvm::dyn_cast<Constant>(EXIT_ON_ERR(
-        caffe2LD.getNodeValueOrCreateConstantByName("tensor_int64_fill")));
-    tensorStringToUInt8Fill = llvm::dyn_cast<Constant>(
-        EXIT_ON_ERR(caffe2LD.getNodeValueOrCreateConstantByName(
-            "tensor_string_to_uint8_fill")));
+    Type unusedTy = Type(ElemKind::FloatTy, {4});
+    Caffe2ModelLoader caffe2LD(
+        NetDescFilename, NetWeightFilename,
+        {"tensor_fill_float_eq", "tensor_int_fill_eq", "tensor_int64_fill_eq",
+         "tensor_string_to_uint8_fill_eq"},
+        {&unusedTy, &unusedTy, &unusedTy, &unusedTy}, *F);
+    tensorFillFloat = llvm::dyn_cast<Constant>(
+        EXIT_ON_ERR(caffe2LD.getNodeValueByName("tensor_fill_float")));
+    tensorIntFill = llvm::dyn_cast<Constant>(
+        EXIT_ON_ERR(caffe2LD.getNodeValueByName("tensor_int_fill")));
+    tensorInt64Fill = llvm::dyn_cast<Constant>(
+        EXIT_ON_ERR(caffe2LD.getNodeValueByName("tensor_int64_fill")));
+    tensorStringToUInt8Fill = llvm::dyn_cast<Constant>(EXIT_ON_ERR(
+        caffe2LD.getNodeValueByName("tensor_string_to_uint8_fill")));
   }
 
   ASSERT_TRUE(tensorFillFloat);
@@ -1646,7 +1771,7 @@ TEST(caffe2, tensorFillsTest) {
 }
 
 TEST(caffe2, Alias) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1682,7 +1807,7 @@ TEST(caffe2, Alias) {
 }
 
 TEST(caffe2, Modulo) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1723,7 +1848,7 @@ TEST(caffe2, Modulo) {
 
 /// Test loading an ElementwiseLinear operator.
 TEST(caffe2, elementwiseLinear) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1738,7 +1863,7 @@ TEST(caffe2, elementwiseLinear) {
   Tensor w(ElemKind::FloatTy, {10}), b(ElemKind::FloatTy, {10});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"X", "w", "b"},
@@ -1799,7 +1924,7 @@ TEST(caffe2, elementwiseLinear) {
 
 /// Test loading an ElementwiseLinear operator with no axis specified.
 TEST(caffe2, elementwiseLinearUnspecifiedAxis) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1818,7 +1943,7 @@ TEST(caffe2, elementwiseLinearUnspecifiedAxis) {
   Tensor w(ElemKind::FloatTy, {10}), b(ElemKind::FloatTy, {10});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"X", "w", "b"},
@@ -1889,7 +2014,7 @@ TEST(caffe2, elementwiseLinearUnspecifiedAxis) {
 ///    LENGTHS = [3, 0, 3, 2]
 ///    OUTPUT =  [[0.5, 0, 0, 25]]
 TEST(caffe2, SparseLengthsWeightedSum8BitsRowwise) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -1909,7 +2034,7 @@ TEST(caffe2, SparseLengthsWeightedSum8BitsRowwise) {
   TypeRef lengthsType = F->getParent()->uniqueType(ElemKind::Int32ITy, {4});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"indices", "lengths"},
@@ -1950,9 +2075,9 @@ TEST(caffe2, SparseLengthsWeightedSum8BitsRowwise) {
   // We have 3 placeholders: 1 for save, and then indices and lengths.
   EXPECT_EQ(mod.getPlaceholders().size(), 3);
 
-  // We have 5 constants: originally fused data (no longer used), data, scales,
-  // offsets, and weights.
-  EXPECT_EQ(mod.getConstants().size(), 5);
+  // We have 4 constants: data, scales, offsets, and weights. Originally fused
+  // data is no longer used and is removed by loader.
+  EXPECT_EQ(mod.getConstants().size(), 4);
 
   EE.compile(CompilationMode::Infer, F);
 
@@ -1995,7 +2120,7 @@ TEST(caffe2, SparseLengthsWeightedSum8BitsRowwise) {
 ///        [3.0, 3.6],
 ///    ]
 TEST(caffe2, SparseLengthsSum8BitsRowwise) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -2013,7 +2138,7 @@ TEST(caffe2, SparseLengthsSum8BitsRowwise) {
   TypeRef lengthsType = F->getParent()->uniqueType(ElemKind::Int32ITy, {5});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"indices", "lengths"},
@@ -2052,9 +2177,9 @@ TEST(caffe2, SparseLengthsSum8BitsRowwise) {
   // We have 3 placeholders: 1 for save, and then indices and lengths.
   EXPECT_EQ(mod.getPlaceholders().size(), 3);
 
-  // We have 5 constants: originally fused data (no longer used), data, scales,
-  // and offsets.
-  EXPECT_EQ(mod.getConstants().size(), 4);
+  // We have 5 constants: Data, scales, and offsets. Originally fused data is no
+  // longer used and is removed by loader.
+  EXPECT_EQ(mod.getConstants().size(), 3);
 
   EE.compile(CompilationMode::Infer, F);
 
@@ -2083,7 +2208,7 @@ TEST(caffe2, SparseLengthsSum8BitsRowwise) {
 ///    LENGTHS = [3, 0, 3, 2]
 ///    OUTPUT =  [[0.5, 0, 0, 25]]
 TEST(caffe2, SparseLengthsWeightedSumFused8BitRowwise) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -2103,7 +2228,7 @@ TEST(caffe2, SparseLengthsWeightedSumFused8BitRowwise) {
   TypeRef lengthsType = F->getParent()->uniqueType(ElemKind::Int32ITy, {4});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"indices", "lengths"},
@@ -2187,7 +2312,7 @@ TEST(caffe2, SparseLengthsWeightedSumFused8BitRowwise) {
 ///        [3.0, 3.6],
 ///    ]
 TEST(caffe2, SparseLengthsSumFused8BitRowwise) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
 
@@ -2207,7 +2332,7 @@ TEST(caffe2, SparseLengthsSumFused8BitRowwise) {
   TypeRef lengthsType = F->getParent()->uniqueType(ElemKind::Int32ITy, {5});
 
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
     Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
                                {"indices", "lengths"},
@@ -2231,17 +2356,13 @@ TEST(caffe2, SparseLengthsSumFused8BitRowwise) {
   };
 
   // High level check on the content of the graph. We have 1 rowwise-quantized
-  // SLWS (which implements SLS), 1 Splat for the weights, and 1 save.
-  EXPECT_EQ(F->getNodes().size(), 3);
+  // SLS and 1 save.
+  EXPECT_EQ(F->getNodes().size(), 2);
   SaveNode *saveNode = getSaveNodeFromDest(output);
-  FusedRowwiseQuantizedSparseLengthsWeightedSumNode *FRWQSLS =
-      llvm::dyn_cast<FusedRowwiseQuantizedSparseLengthsWeightedSumNode>(
+  FusedRowwiseQuantizedSparseLengthsSumNode *FRWQSLS =
+      llvm::dyn_cast<FusedRowwiseQuantizedSparseLengthsSumNode>(
           saveNode->getInput().getNode());
   ASSERT_TRUE(FRWQSLS);
-  SplatNode *splatNode =
-      llvm::dyn_cast<SplatNode>(FRWQSLS->getWeights().getNode());
-  ASSERT_TRUE(splatNode);
-  EXPECT_EQ(splatNode->getValue(), 1.0f);
   // Check that the data input is a Constant node with expected ElemKind.
   Constant *data = llvm::dyn_cast<Constant>(FRWQSLS->getData().getNode());
   ASSERT_TRUE(data);
@@ -2268,29 +2389,144 @@ TEST(caffe2, SparseLengthsSumFused8BitRowwise) {
 
 /// Load big enough model and validate node order.
 TEST(caffe2, validateNodeOrder) {
-  ExecutionEngine EE{BackendKind::Interpreter};
+  ExecutionEngine EE{};
   auto &mod = EE.getModule();
   Function *F = mod.createFunction("main");
   std::string NetDescFilename(
       GLOW_DATA_PATH
-      "tests/models/caffe2Models/parallel_matmul_predict_net.pbtxt");
+      "tests/models/caffe2Models/batch_box_cox_predict_net.pbtxt");
   std::string NetWeightFilename(
       GLOW_DATA_PATH "tests/models/caffe2Models/empty_init_net.pbtxt");
 
-  Tensor inputs_0(ElemKind::FloatTy, {3, 10, 7});
-  Tensor inputs_1(ElemKind::FloatTy, {3, 7, 10});
+  PlaceholderBindings bindings;
+
+  // Input tensors.
+  const size_t kRows = 10;
+  const size_t kCols = 5;
+  Tensor data(ElemKind::FloatTy, {kRows, kCols});
+  Tensor lambda1(ElemKind::FloatTy, {kCols});
+  Tensor lambda2(ElemKind::FloatTy, {kCols});
+  Tensor O(ElemKind::FloatTy, {kRows, kCols});
   // Destroy the loader after the graph is loaded since the following execution
-  // will not depend on anyting from the loader.
+  // will not depend on anything from the loader.
   {
-    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
-                               {"inputs_0", "inputs_1"},
-                               {&inputs_0.getType(), &inputs_1.getType()}, *F);
+    Caffe2ModelLoader caffe2LD(
+        NetDescFilename, NetWeightFilename, {"data", "lambda1", "lambda2"},
+        {&data.getType(), &lambda1.getType(), &lambda2.getType()}, *F);
+    bindings.allocate(mod.getPlaceholders());
+    updateInputPlaceholdersByName(bindings, &mod,
+                                  {"data", "lambda1", "lambda2"},
+                                  {&data, &lambda1, &lambda2});
   }
 
-  // We have 6 slices, 3 matmuls, 1 concat, 7 reshapes, 1 save.
+  // We should have 2 Broadcast (2 Reshape and 2 Tile), 2 Add, 4 Splat,
+  // 1 Max, 1 Log, 1 Pow, 1 Sub, 1 Div, 1 CmpEQ, 1 Select and 1 Output =
+  // 18 nodes in total.
   EXPECT_EQ(F->getNodes().size(), 18);
   // Make sure that nodes are sorted by name.
   EXPECT_TRUE(std::is_sorted(
       F->getNodes().begin(), F->getNodes().end(),
       [](const Node &a, const Node &b) { return a.getName() < b.getName(); }));
+}
+
+TEST(caffe2, importInt8ConvRelu) {
+  ExecutionEngine EE{};
+  auto &mod = EE.getModule();
+  Function *F = mod.createFunction("main");
+
+  std::string NetDescFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/int8convrelu_pred_net.pbtxt");
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/int8convrelu_init_net.pbtxt");
+
+  Placeholder *output;
+  PlaceholderBindings bindings;
+
+  // Destroy the loader after the graph is loaded since the following execution
+  // will not depend on anything from the loader.
+  {
+    Tensor data(ElemKind::Int8QTy, {1, 1, 3, 3}, 1, 0);
+    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
+                               {"gpu_0/data_0"}, {&data.getType()}, *F);
+    output = EXIT_ON_ERR(caffe2LD.getSingleOutput());
+
+    bindings.allocate(mod.getPlaceholders());
+    updateInputPlaceholdersByName(bindings, &mod, {"gpu_0/data_0"}, {&data});
+  }
+
+  // High level check on the content of the graph. We should have
+  // transpose => conv => relu => transpose => save
+  EXPECT_EQ(F->getNodes().size(), 5);
+  auto *saveNode = getSaveNodeFromDest(output);
+
+  auto *transNode1 =
+      llvm::dyn_cast<TransposeNode>(saveNode->getInput().getNode());
+  ASSERT_TRUE(transNode1);
+  auto *reluNode = llvm::dyn_cast<ReluNode>(transNode1->getInput().getNode());
+  ASSERT_TRUE(reluNode);
+  auto *convNode =
+      llvm::dyn_cast<ConvolutionNode>(reluNode->getInput().getNode());
+  ASSERT_TRUE(convNode);
+  auto *transNode2 =
+      llvm::dyn_cast<TransposeNode>(convNode->getInput().getNode());
+  ASSERT_TRUE(transNode2);
+
+  EE.compile(CompilationMode::Infer, F);
+}
+
+TEST(caffe2, importInt8SumRelu) {
+  ExecutionEngine EE{};
+  auto &mod = EE.getModule();
+  Function *F = mod.createFunction("main");
+
+  std::string NetDescFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/int8sumrelu_pred_net.pbtxt");
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/int8sumrelu_init_net.pbtxt");
+
+  Placeholder *output;
+  PlaceholderBindings bindings;
+
+  // Destroy the loader after the graph is loaded since the following execution
+  // will not depend on anything from the loader.
+  {
+    Tensor data(ElemKind::Int8QTy, {4, 2}, 1, 0);
+    Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
+                               {"gpu_0/data_0"}, {&data.getType()}, *F);
+    output = EXIT_ON_ERR(caffe2LD.getSingleOutput());
+
+    bindings.allocate(mod.getPlaceholders());
+    updateInputPlaceholdersByName(bindings, &mod, {"gpu_0/data_0"}, {&data});
+  }
+
+  // High level check on the content of the graph. We should have
+  // input-=> add => relu => save
+  // const/
+  EXPECT_EQ(F->getNodes().size(), 3);
+  auto *save = getSaveNodeFromDest(output);
+
+  auto *relu = llvm::dyn_cast<ReluNode>(save->getInput().getNode());
+  ASSERT_TRUE(relu);
+  auto *add = llvm::dyn_cast<AddNode>(relu->getInput().getNode());
+  ASSERT_TRUE(add);
+  auto *input = llvm::dyn_cast<Placeholder>(add->getLHS().getNode());
+  ASSERT_TRUE(input);
+  auto *val = llvm::dyn_cast<Constant>(add->getRHS().getNode());
+  ASSERT_TRUE(val);
+
+  EE.compile(CompilationMode::Infer, F);
+}
+
+TEST(caffe2, importNames) {
+  std::string NetDescFilename(GLOW_DATA_PATH
+                              "tests/models/caffe2Models/sigmoid.pbtxt");
+  std::string NetWeightFilename(
+      GLOW_DATA_PATH "tests/models/caffe2Models/empty_init_net.pbtxt");
+  ExecutionEngine EE;
+  auto &mod = EE.getModule();
+  auto *F = mod.createFunction("main");
+  Tensor input(ElemKind::FloatTy, {6});
+  Caffe2ModelLoader caffe2LD(NetDescFilename, NetWeightFilename,
+                             {"sigmoid_test_input"}, {&input.getType()}, *F);
+  EXPECT_TRUE(F->getNodeByName("sigmoid_test_output"));
 }

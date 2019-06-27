@@ -21,7 +21,8 @@
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cassert>
+#include <glog/logging.h>
+
 #include <fstream>
 #include <iostream>
 
@@ -34,13 +35,10 @@ enum class ModelKind {
 
 namespace {
 llvm::cl::OptionCategory cifarCat("CIFAR10 Options");
-llvm::cl::opt<BackendKind> executionBackend(
-    llvm::cl::desc("Backend to use:"), llvm::cl::Optional,
-    llvm::cl::values(clEnumValN(BackendKind::Interpreter, "interpreter",
-                                "Use interpreter (default option)"),
-                     clEnumValN(BackendKind::CPU, "cpu", "Use CPU"),
-                     clEnumValN(BackendKind::OpenCL, "opencl", "Use OpenCL")),
-    llvm::cl::init(BackendKind::Interpreter), llvm::cl::cat(cifarCat));
+llvm::cl::opt<std::string> executionBackend(
+    "backend",
+    llvm::cl::desc("Backend to use, e.g., Interpreter, CPU, OpenCL:"),
+    llvm::cl::Optional, llvm::cl::init("Interpreter"), llvm::cl::cat(cifarCat));
 llvm::cl::opt<ModelKind>
     model(llvm::cl::desc("Model to use:"), llvm::cl::Optional,
           llvm::cl::values(clEnumValN(ModelKind::MODEL_SIMPLE, "model-simple",
@@ -125,13 +123,11 @@ void testCIFAR10() {
   std::ifstream dbInput("cifar-10-batches-bin/data_batch_1.bin",
                         std::ios::binary);
 
-  if (!dbInput.is_open()) {
-    llvm::outs() << "Failed to open cifar10 data file, probably missing.\n";
-    llvm::outs() << "Run 'python ../glow/utils/download_test_db.py'\n";
-    exit(1);
-  }
+  CHECK(dbInput.is_open())
+      << "Failed to open cifar10 data file, probably missing. Run 'python "
+         "../glow/utils/download_datasets_and_models.py -d cifar10'";
 
-  llvm::outs() << "Loading the CIFAR-10 database.\n";
+  LOG(INFO) << "Loading the CIFAR-10 database.\n";
 
   /// Load the CIFAR database into a 4d tensor.
   Tensor images(ElemKind::FloatTy, {cifarNumImages, 32, 32, 3});
@@ -154,7 +150,7 @@ void testCIFAR10() {
       }
     }
   }
-  GLOW_ASSERT(idx == cifarImageSize * cifarNumImages && "Invalid input file");
+  CHECK_EQ(idx, cifarImageSize * cifarNumImages) << "Invalid input file";
 
   unsigned minibatchSize = 8;
 
@@ -192,7 +188,7 @@ void testCIFAR10() {
   // Report less often for fast models.
   int reportRate = model == ModelKind::MODEL_SIMPLE ? 256 : 64;
 
-  llvm::outs() << "Training.\n";
+  LOG(INFO) << "Training.";
 
   // This variable records the number of the next sample to be used for
   // training.
@@ -200,8 +196,8 @@ void testCIFAR10() {
 
   for (int iter = 0; iter < 100000; iter++) {
     unsigned epoch = (iter * reportRate) / labels.getType().sizes_[0];
-    llvm::outs() << "Training - iteration #" << iter << " (epoch #" << epoch
-                 << ")\n";
+    LOG(INFO) << "Training - iteration #" << iter << " (epoch #" << epoch
+              << ")";
 
     llvm::Timer timer("Training", "Training");
     timer.startTimer();
@@ -226,15 +222,15 @@ void testCIFAR10() {
         score += guess == correct;
 
         if ((iter < numLabels) && i == 0) {
-          llvm::outs() << iter << ") Expected: " << textualLabels[correct]
-                       << " Got: " << textualLabels[guess] << "\n";
+          LOG(INFO) << iter << ") Expected: " << textualLabels[correct]
+                    << " Got: " << textualLabels[guess];
         }
       }
     }
 
     timer.stopTimer();
 
-    llvm::outs() << "Iteration #" << iter << " score: " << score << "%\n";
+    LOG(INFO) << "Iteration #" << iter << " score: " << score << "%";
   }
 }
 

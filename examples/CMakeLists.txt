@@ -16,8 +16,9 @@ target_link_libraries(mnist
                         Backends
                         ExecutionEngine
                         Graph
+                        Importer
                         IR
-                        Optimizer
+                        GraphOptimizer
                         Support
                         LLVMSupport)
 
@@ -40,7 +41,7 @@ target_link_libraries(char-rnn
                         ExecutionEngine
                         Graph
                         IR
-                        Optimizer
+                        GraphOptimizer
                         Support)
 
 add_executable(fr2en
@@ -50,7 +51,7 @@ target_link_libraries(fr2en
                         Base
                         ExecutionEngine
                         IR
-                        Optimizer
+                        GraphOptimizer
                         Quantization
                         Support
                         LLVMSupport)
@@ -95,8 +96,7 @@ if(GLOW_WITH_CPU)
                           HostManager
                           Partitioner
                           Graph
-                          Importer
-                          Optimizer)
+                          Importer)
   target_include_directories(resnet-runtime PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 
   add_executable(tracing-compare
@@ -105,15 +105,15 @@ if(GLOW_WITH_CPU)
                         PRIVATE
                           Backend
                           Backends
-                          DeviceManager
                           ExecutionEngine
                           Graph
                           Importer
-                          Optimizer
-                          ThreadPool)
+                          GraphOptimizer)
 endif()
 
 
 if(GLOW_WITH_BUNDLES)
   add_subdirectory(bundles)
 endif()
+
+add_subdirectory(training)

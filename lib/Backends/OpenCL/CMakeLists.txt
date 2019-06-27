@@ -1,31 +1,41 @@
-add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels.cl.inc"
-  COMMAND include-bin
-          "${CMAKE_CURRENT_SOURCE_DIR}/kernels.cl"
-          "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels.cl.inc"
-  DEPENDS include-bin "${CMAKE_CURRENT_SOURCE_DIR}/kernels.cl")
+set(OpenCL_DIR ${CMAKE_BINARY_DIR}/glow/OpenCL)
 
 add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_conv.cl.inc"
+    OUTPUT ${OpenCL_DIR}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${OpenCL_DIR})
+add_custom_target(make_opencl_dir
+    DEPENDS ${OpenCL_DIR})
+
+add_custom_command(
+  OUTPUT "${OpenCL_DIR}/kernels.cl.inc"
+  COMMAND include-bin
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels.cl"
+          "${OpenCL_DIR}/kernels.cl.inc"
+  DEPENDS make_opencl_dir include-bin "${CMAKE_CURRENT_SOURCE_DIR}/kernels.cl")
+
+add_custom_command(
+  OUTPUT "${OpenCL_DIR}/kernels_fwd_conv.cl.inc"
   COMMAND include-bin
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels_fwd_conv.cl"
-          "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_conv.cl.inc"
-  DEPENDS include-bin
+          "${OpenCL_DIR}/kernels_fwd_conv.cl.inc"
+  DEPENDS make_opencl_dir include-bin
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels_fwd_conv.cl")
 
 add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_quantized_conv.cl.inc"
+  OUTPUT "${OpenCL_DIR}/kernels_fwd_quantized_conv.cl.inc"
   COMMAND include-bin
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels_fwd_quantized_conv.cl"
-          "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_quantized_conv.cl.inc"
-  DEPENDS include-bin
+          "${OpenCL_DIR}/kernels_fwd_quantized_conv.cl.inc"
+  DEPENDS make_opencl_dir include-bin
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels_fwd_quantized_conv.cl")
 
 add_library(OpenCLBackend
-            "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels.cl.inc"
-            "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_conv.cl.inc"
-            "${CMAKE_BINARY_DIR}/glow/OpenCL/kernels_fwd_quantized_conv.cl.inc"
+            "${OpenCL_DIR}/kernels.cl.inc"
+            "${OpenCL_DIR}/kernels_fwd_conv.cl.inc"
+            "${OpenCL_DIR}/kernels_fwd_quantized_conv.cl.inc"
             OpenCL.cpp
+            OpenCLDeviceManager.cpp
+            OpenCLFactory.cpp
             Transforms.cpp)
 
 target_link_libraries(OpenCLBackend
@@ -35,32 +45,12 @@ target_link_libraries(OpenCLBackend
                       Graph
                       CodeGen
                       IR
-                      Optimizer
+                      LLVMCore
+                      IROptimizer
                       QuantizationBase)
 
 target_link_libraries(OpenCLBackend
                       PUBLIC
                       OpenCL::OpenCL)
 
-add_library(OpenCLDeviceManager
-            OpenCLDeviceManager.cpp)
-target_link_libraries(OpenCLDeviceManager
-                      PRIVATE
-                        Backend
-                        OpenCLBackend
-                        Base
-                        CodeGen
-                        Graph
-                        IR
-                        Optimizer
-                        ThreadPool)
-
-add_library(OpenCLFactory
-              OpenCLFactory.cpp)
-target_link_libraries(OpenCLFactory
-                      PRIVATE
-                        OpenCLBackend
-                        LLVMCore)
-
-set(linked_factories ${linked_factories} OpenCLFactory PARENT_SCOPE)
-set(linked_device_managers ${linked_device_managers} OpenCLDeviceManager PARENT_SCOPE)
+set(linked_backends ${linked_backends} OpenCLBackend PARENT_SCOPE)

@@ -22,6 +22,8 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <glog/logging.h>
+
 namespace glow {
 /// NOTE This should not be used directly, instead use EXIT_ON_ERR or
 /// TEMP_EXIT_ON_ERR. Callable that takes an llvm::Error or llvm::Expected<T>
@@ -77,6 +79,12 @@ public:
     RUNTIME_REQUEST_REFUSED,
     // Runtime error, device wasn't found.
     RUNTIME_DEVICE_NOT_FOUND,
+    // Runtime error, network busy to perform any operation on it.
+    RUNTIME_NET_BUSY,
+    // Compilation error; node unsupported after optimizations.
+    COMPILE_UNSUPPORTED_NODE_AFTER_OPTIMIZE,
+    // Compilation error; Compilation context not correctly setup.
+    COMPILE_CONTEXT_MALFORMED,
   };
 
   /// GlowErr is not convertable to std::error_code. This is included for
@@ -89,7 +97,7 @@ public:
   /// line number the GlowErr was created on as well as the message and/or error
   /// code the GlowErr was created with.
   void log(llvm::raw_ostream &OS) const override {
-    OS << "file: " << fileName_ << " line: " << lineNumber_;
+    OS << "location: " << fileName_ << ":" << lineNumber_;
     if (ec_ != ErrorCode::UNKNOWN) {
       OS << " error code: " << errorCodeToString(ec_);
     }
@@ -142,6 +150,12 @@ private:
       return "RUNTIME_REQUEST_REFUSED";
     case ErrorCode::RUNTIME_DEVICE_NOT_FOUND:
       return "RUNTIME_DEVICE_NOT_FOUND";
+    case ErrorCode::RUNTIME_NET_BUSY:
+      return "RUNTIME_NET_BUSY";
+    case ErrorCode::COMPILE_UNSUPPORTED_NODE_AFTER_OPTIMIZE:
+      return "COMPILE_UNSUPPORTED_NODE_AFTER_OPTIMIZE";
+    case ErrorCode::COMPILE_CONTEXT_MALFORMED:
+      return "COMPILE_CONTEXT_MALFORMED";
     };
 
     llvm_unreachable("unsupported ErrorCode");
@@ -210,23 +224,42 @@ private:
     }                                                                          \
   } while (0)
 
+/// Marks the given llvm::Error as checked as long as it's value is equal to
+/// llvm::Error::success(). This macro should be used as little as possible but
+/// but is useful for example for creating dummy Errors that can be passed into
+/// fallible constructor by reference to be filled in the event an Error occurs.
+#define MARK_ERR_CHECKED(err)                                                  \
+  do {                                                                         \
+    bool success = !(err);                                                     \
+    (void)success;                                                             \
+    assert(success && "MARK_ERR_CHECKED should not be called on an "           \
+                      "llvm::Error that contains an actual error.");           \
+  } while (0)
+
 /// Marks the Error \p err as as checked. \returns true if it contains an
 /// error value and prints the message in the error value, returns false
 /// otherwise.
 inline bool errToBool(llvm::Error err) {
   if (static_cast<bool>(err)) {
-    llvm::errs() << "Converting error to boolean: "
-                 << llvm::toString(std::move(err)) << "\n";
+    LOG(ERROR) << "Converting error to boolean: "
+               << llvm::toString(std::move(err));
     return true;
   }
   return false;
+}
+
+template <typename T> llvm::Error takeErr(llvm::Expected<T> e) {
+  if (!bool(e)) {
+    return e.takeError();
+  } else {
+    return llvm::Error::success();
+  }
 }
 
 /// This class holds an llvm::Error provided via the add method. If an Error is
 /// added when the class already holds an Error, it will discard the new Error
 /// in favor of the original one. All methods in OneErrOnly are thread-safe.
 class OneErrOnly {
-private:
   llvm::Error err_ = llvm::Error::success();
   std::mutex m_;
 

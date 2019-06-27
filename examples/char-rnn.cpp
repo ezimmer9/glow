@@ -16,12 +16,15 @@
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Graph/Graph.h"
 #include "glow/IR/IR.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Support/Support.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Timer.h"
+
+#include <glog/logging.h>
 
 #include <string>
 
@@ -42,13 +45,10 @@ static llvm::cl::opt<std::string> inputFilename(llvm::cl::desc("input file"),
                                                 llvm::cl::Positional,
                                                 llvm::cl::cat(category));
 
-llvm::cl::opt<BackendKind> executionBackend(
-    llvm::cl::desc("Backend to use:"), llvm::cl::Optional,
-    llvm::cl::values(clEnumValN(BackendKind::Interpreter, "interpreter",
-                                "Use interpreter (default option)"),
-                     clEnumValN(BackendKind::CPU, "cpu", "Use CPU"),
-                     clEnumValN(BackendKind::OpenCL, "opencl", "Use OpenCL")),
-    llvm::cl::init(BackendKind::Interpreter), llvm::cl::cat(category));
+llvm::cl::opt<std::string> executionBackend(
+    "backend",
+    llvm::cl::desc("Backend to use, e.g., Interpreter, CPU, OpenCL:"),
+    llvm::cl::Optional, llvm::cl::init("Interpreter"), llvm::cl::cat(category));
 
 llvm::cl::opt<unsigned> numEpochs("epochs",
                                   llvm::cl::desc("Process the input N times."),
@@ -78,12 +78,12 @@ static size_t clipASCII(char c) {
 /// then only load the first slice of inputText.
 static void loadText(Tensor &inputText, Tensor &nextChar, llvm::StringRef text,
                      bool train) {
-  assert(text.size() > 2 && "The buffer must contain at least two chars");
+  DCHECK_GT(text.size(), 2) << "The buffer must contain at least two chars";
   inputText.zero();
   nextChar.zero();
 
   auto idim = inputText.dims();
-  assert(idim.size() == 3 && "invalid input tensor");
+  DCHECK_EQ(idim.size(), 3) << "invalid input tensor";
   auto B = idim[0];
   auto S = idim[1];
 
@@ -148,8 +148,8 @@ static std::unique_ptr<llvm::MemoryBuffer> loadFile(llvm::StringRef filename) {
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> fileBufOrErr =
       llvm::MemoryBuffer::getFileOrSTDIN(filename);
   if (!fileBufOrErr) {
-    llvm::errs() << "Error! Failed to open file: " << filename << "\n";
-    llvm::errs() << fileBufOrErr.getError().message() << "\n";
+    LOG(ERROR) << "Error! Failed to open file: " << filename.str() << "\n";
+    LOG(ERROR) << fileBufOrErr.getError().message() << "\n";
     exit(-1);
   }
 
@@ -171,7 +171,7 @@ static Function *createNetwork(Module &mod, PlaceholderBindings &bindings,
                                   "expected", false);
   bindings.allocate(Y);
 
-  std::vector<Node *> slicesX;
+  std::vector<NodeValue> slicesX;
   std::vector<Node *> expectedX;
 
   for (unsigned t = 0; t < numSteps; t++) {
@@ -209,7 +209,7 @@ int main(int argc, char **argv) {
   llvm::cl::ParseCommandLineOptions(argc, argv, " The char-rnn test\n\n");
   auto mb = loadFile(inputFilename);
   auto text = mb.get()->getBuffer();
-  llvm::outs() << "Loaded " << text.size() << " chars.\n";
+  LOG(INFO) << "Loaded " << text.size() << " chars.\n";
   PlaceholderBindings bindings;
 
   const size_t numSteps = 50;
@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
   const size_t batchSize = text.size() - numSteps;
   const size_t hiddenSize = 256;
 
-  GLOW_ASSERT(text.size() > numSteps && "Text is too short");
+  CHECK_GT(text.size(), numSteps) << "Text is too short";
   TrainingConfig TC;
 
   ExecutionEngine EE(executionBackend);
@@ -249,10 +249,9 @@ int main(int argc, char **argv) {
     EE.compile(CompilationMode::Train, TF);
 
     // Train the network on the whole input.
-    llvm::outs() << "Iteration " << i + 1 << "/" << numEpochs;
+    LOG(INFO) << "Iteration " << i + 1 << "/" << numEpochs;
     runBatch(EE, bindings, batchSize / minibatchSize, sampleCounter, {X, Y},
              {&thisCharTrain, &nextCharTrain});
-    llvm::outs() << ".\n";
 
     //// Use the trained network to generate some text ////
     auto *res =

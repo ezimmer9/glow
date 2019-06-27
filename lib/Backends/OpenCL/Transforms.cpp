@@ -27,10 +27,13 @@ using namespace glow;
 
 /// Perform OpenCL specific post-lowering graph transformation.
 bool OCLBackend::transformPostLowering(Function *F,
-                                       const CompilationContext &cctx) const {
+                                       CompilationContext &cctx) const {
   // NCHW transformation is not supported in training mode yet, because of some
   // issues with gradient nodes.
-  if (cctx.mode == CompilationMode::Train)
+
+  LOG_SCOPE(F->getLogContext(), "OCLBackend::transformPostLowering")
+
+  if (cctx.compMode == CompilationMode::Train)
     return false;
 
   bool changed = false;

@@ -81,11 +81,30 @@ int main(int argc, char **argv) {
       .addMember(MemberType::VectorUnsigned, "Strides")
       .addMember(MemberType::VectorUnsigned, "Pads")
       .addMember(MemberType::Unsigned, "Group")
+      .addMember(MemberType::Unsigned, "Dilation")
       .addResultFromCtorArg()
       .addGradient()
       .setDocstring("Performs 2D Convolution using a given Input, Filter, and "
                     "Bias tensors, as well as provided Kernels, Strides, Pads, "
-                    "and Group.");
+                    "Group and Dilation.");
+
+  BB.newNode("ChannelwiseQuantizedConvolution")
+      .addInput("Input")
+      .addInput("Filter")
+      .addInput("Bias")
+      .addInput("Scales")
+      .addInput("Offsets")
+      .addMember(MemberType::VectorUnsigned, "Kernels")
+      .addMember(MemberType::VectorUnsigned, "Strides")
+      .addMember(MemberType::VectorUnsigned, "Pads")
+      .addMember(MemberType::Unsigned, "Group")
+      .addMember(MemberType::Boolean, "Groupwise")
+      .addResultFromCtorArg()
+      .setDocstring("Performs 2D Convolution using a given Input, Filter, and "
+                    "Bias tensors, as well as provided Kernels, Strides, Pads, "
+                    "and Group. Quantization parameters are provided by Scales "
+                    "and Offsets. If Groupwise is true then the quantization "
+                    "is per-group otherwise it is per-channel.");
 
   BB.newNode("Convolution3D")
       .addInput("Input")
@@ -290,6 +309,11 @@ int main(int argc, char **argv) {
       .addInput("Input")
       .addResultFromCtorArg()
       .setDocstring("Performs element-wise natural log to the Input.");
+
+  BB.newNode("Exp")
+      .addInput("Input")
+      .addResultFromCtorArg()
+      .setDocstring("Performs element-wise exponential to the Input.");
   // clang-format on
 
   BB.newNode("Select")
@@ -312,8 +336,16 @@ int main(int argc, char **argv) {
       .addInput("LHS")
       .addInput("RHS")
       .addResultFromCtorArg()
-      .setDocstring("Performs matrix multiplication between the LHS RHS."
+      .setDocstring("Performs matrix multiplication between the LHS and RHS."
                     "Example: (A, Z) x (Z, B) => (A, B)");
+
+  BB.newNode("BatchMatMul")
+      .addInput("LHS")
+      .addInput("RHS")
+      .addResultFromCtorArg()
+      .setDocstring("Performs batch matrix multiplication between the LHS and "
+                    "RHS. The operands are a stack of two dimensional "
+                    "matrices. Example: (N, A, Z) x (N, Z, B) => (N, A, B)");
 
   BB.newNode("BatchedReduceAdd")
       .addInput("Batch")
@@ -346,6 +378,18 @@ int main(int argc, char **argv) {
                     "added together and stored in Result[0], the subsequent "
                     "Lengths[1] slices are added together and stored in "
                     "Result[1], etc.");
+
+  BB.newNode("SparseLengthsSum")
+      .addInput("Data")
+      .addInput("Indices")
+      .addInput("Lengths")
+      .addResultFromCtorArg()
+      .setDocstring("Gathers slices of the outer-most dimension of Data "
+                    "indexed by Indices vector, and then accumulates them into "
+                    "len(Lengths) entries: first Lengths[0] slices are "
+                    "aggregated to Result[0], next Lengths[1] slices are "
+                    "aggregated to Result[1], etc. I.e. sum(Lengths) must be "
+                    "equal to len(Indices).");
 
   BB.newNode("SparseLengthsWeightedSum")
       .addInput("Data")
@@ -403,6 +447,21 @@ int main(int argc, char **argv) {
                     "Offsets are appended to the end of each row. Thus, Data "
                     "must be a two-dimensional tensor.");
 
+  BB.newNode("FusedRowwiseQuantizedSparseLengthsSum")
+      .addInput("Data")
+      .addInput("Indices")
+      .addInput("Lengths")
+      .addResultFromCtorArg()
+      .setDocstring("Gathers slices of the outer-most dimension of Data "
+                    "indexed by Indices vector, and then accumulates them into "
+                    "len(Lengths) entries: first Lengths[0] slices are "
+                    "aggregated to Result[0], next Lengths[1] slices are "
+                    "aggregated to Result[1], etc. I.e. sum(Lengths) must be "
+                    "equal to len(Indices). The input "
+                    "data is fused rowwise-quantized, where the Scales and "
+                    "Offsets are appended to the end of each row. Thus, Data "
+                    "must be a two-dimensional tensor.");
+
   BB.newNode("LengthsToRanges")
       .addInput("Lengths")
       .addResultFromCtorArg()
@@ -410,6 +469,12 @@ int main(int argc, char **argv) {
                     "each segment and packs them next to the lengths. For the "
                     "input vector of length N the output is a Nx2 matrix with "
                     "(offset, lengths) packaged for each segment.");
+
+  BB.newNode("LengthsRangeFill")
+      .addInput("Lengths")
+      .addResultFromCtorArg()
+      .setDocstring(
+          "Converts an input Lengths 1D vector into a range sequence.");
 
   BB.newNode("SparseToDense")
       .addInput("Indices")
@@ -594,6 +659,16 @@ int main(int argc, char **argv) {
                     "according to One Hot Encoding. i-th element of Result's "
                     "row is one iff Values[i] equals to the corresponding "
                     "element of Data.");
+
+  BB.newNode("SpaceToDepth")
+      .addInput("Input")
+      .addMember(MemberType::Unsigned, "BlockSize")
+      .addResultFromCtorArg()
+      .setDocstring("Given Input tensor of [N,H,W,C], where N is the batch "
+                    "axis, C is the channel or depth, H is the height and W is "
+                    "the width. This produces Output tensor of [N, "
+                    "H/BlockSize, W/BlockSize, C * "
+                    "BlockSize * BlockSize].");
 
   //===--------------------------------------------------------------------===//
   //                Nodes used for network training

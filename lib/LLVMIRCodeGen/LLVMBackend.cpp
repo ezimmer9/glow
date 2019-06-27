@@ -19,10 +19,11 @@
 #include "CommandLine.h"
 #include "glow/LLVMIRCodeGen/LLVMCompiledFunction.h"
 
-#include "glow/Backends/BackendUtils.h"
+#include "glow/Backend/BackendUtils.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Graph/PlaceholderBindings.h"
 #include "glow/IR/Instrs.h"
+#include "glow/Optimizer/IROptimizer/IROptimizer.h"
 #include "glow/Support/Debug.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -130,7 +131,7 @@ LLVMBackend::compileIRWithoutConstants(IRFunction *IR) const {
   return createCompiledFunction(std::move(JIT), runtimeInfo);
 }
 
-std::unique_ptr<CompiledFunction>
+llvm::Expected<std::unique_ptr<CompiledFunction>>
 LLVMBackend::compile(Function *F, const BackendOptions &opts) const {
   TraceInfo traceInfo = buildManualTraceInfo(F);
   auto IR = generateAndOptimizeIR(F, *this, shouldShareBuffers());
@@ -147,15 +148,17 @@ LLVMBackend::compile(Function *F, const BackendOptions &opts) const {
   }
 
   compiledFunc->setTraceInfo(std::move(traceInfo));
-  return compiledFunc;
+  return llvm::Expected<std::unique_ptr<CompiledFunction>>(
+      std::move(compiledFunc));
 }
 
 void LLVMBackend::save(Function *F, llvm::StringRef outputDir,
-                       llvm::StringRef networkName) const {
+                       llvm::StringRef bundleName,
+                       llvm::StringRef mainEntryName) const {
   llvm::SmallVector<std::string, 8> targetFeatures(llvmTargetFeatures.begin(),
                                                    llvmTargetFeatures.end());
   auto IR = generateAndOptimizeIR(F, *this, shouldShareBuffers());
   BundleSaver(IR.get(), *this)
       .save(getTarget(), getArch(), getCPU(), targetFeatures, outputDir,
-            networkName);
+            bundleName, mainEntryName);
 }

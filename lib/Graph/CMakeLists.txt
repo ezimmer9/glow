@@ -25,6 +25,7 @@ add_library(Graph
             Node.cpp
             Nodes.cpp
             NodeValue.cpp
+            Log.cpp
             PlaceholderBindings.cpp
             Graph.cpp
             Grad.cpp
@@ -34,6 +35,7 @@ target_link_libraries(Graph
                       PUBLIC
                         Base
                         Support
-                        QuantizationBase)
+                        QuantizationBase
+                        TensorPool)
 
 add_dependencies(Graph AutoGen)

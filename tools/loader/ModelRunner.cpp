@@ -28,9 +28,10 @@ using namespace glow;
 
 int main(int argc, char **argv) {
   PlaceholderBindings bindings;
-  // The loader verifies/initializes command line parameters, and initializes
+  // Verify/initialize command line parameters, and then loader initializes
   // the ExecutionEngine and Function.
-  Loader loader(argc, argv);
+  parseCommandLine(argc, argv);
+  Loader loader;
 
   // Create the model based on the input net, and get SaveNode for the output.
   std::unique_ptr<ProtobufLoader> LD;
@@ -45,6 +46,8 @@ int main(int argc, char **argv) {
   Placeholder *output = EXIT_ON_ERR(LD->getSingleOutput());
   auto *outputT = bindings.allocate(output);
 
+  std::string modelName = loader.getFunction()->getName().str();
+
   // Compile the model, and perform quantization/emit a bundle/dump debug info
   // if requested from command line.
   loader.compile(bindings);
@@ -53,10 +56,19 @@ int main(int argc, char **argv) {
   if (!emittingBundle()) {
     loader.runInference(bindings);
 
-    llvm::outs() << "Model: " << loader.getFunction()->getName() << "\n";
+    llvm::outs() << "Model: " << modelName << "\n";
 
     // Print out the result of output operator.
-    outputT->getHandle().dump();
+    switch (outputT->getElementType()) {
+    case ElemKind::FloatTy:
+      outputT->getHandle<float>().dump();
+      break;
+    case ElemKind::Int8QTy:
+      outputT->getHandle<int8_t>().dump();
+      break;
+    default:
+      LOG(FATAL) << "Unexpected output type";
+    }
 
     // If profiling, generate and serialize the quantization infos now that we
     // have run inference to gather the profile.

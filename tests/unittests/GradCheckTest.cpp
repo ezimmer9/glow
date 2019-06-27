@@ -27,7 +27,7 @@
 using namespace glow;
 using llvm::cast;
 
-class GradCheckBase : public ::testing::TestWithParam<BackendKind> {
+class GradCheckBase : public ::testing::TestWithParam<std::string> {
 public:
   ExecutionEngine EE_{GetParam()};
 };
@@ -200,6 +200,162 @@ TEST_P(InterpreterGrad, gradientCheckConcat) {
                    0.01);
 }
 
+TEST_P(InterpreterGrad, gradientCheckMatMul) {
+  PlaceholderBindings Bindings;
+  size_t NumDim = 10;
+
+  auto &Mod = EE_.getModule();
+  Function *F = Mod.createFunction("main");
+
+  auto *A =
+      Mod.createPlaceholder(ElemKind::FloatTy, {NumDim, NumDim}, "A", false);
+  auto *B =
+      Mod.createPlaceholder(ElemKind::FloatTy, {NumDim, NumDim}, "B", false);
+
+  auto HandleB = Bindings.allocate(B)->getHandle<float>();
+  HandleB.randomize(-1, 1, Mod.getPRNG());
+
+  auto *Exp =
+      Mod.createPlaceholder(ElemKind::FloatTy, {NumDim, NumDim}, "exp", false);
+  Node *MM = F->createMatMul("matmul", A, B);
+  auto *Reg = F->createRegression("reg", MM, Exp);
+  auto *Result = F->createSave("save", Reg);
+
+  Tensor Inputs(ElemKind::FloatTy, {{NumDim, NumDim}});
+  Tensor Outputs(ElemKind::FloatTy, {{NumDim, NumDim}});
+
+  auto InputsH = Inputs.getHandle<>();
+  auto OutputsH = Outputs.getHandle<>();
+
+  InputsH.randomize(-1, 1, Mod.getPRNG());
+  OutputsH.randomize(-1, 1, Mod.getPRNG());
+
+  performGradCheck(EE_, Bindings, Result, A, Exp, &Inputs, &Outputs, 0.001,
+                   0.01);
+}
+
+TEST_P(InterpreterGrad, gradientCheckBatchedReduceAddAxis0) {
+  PlaceholderBindings Bindings;
+  size_t BatchSize = 4;
+  size_t NumRows = 3;
+  size_t NumCols = 5;
+
+  auto &Mod = EE_.getModule();
+  Function *F = Mod.createFunction("main");
+
+  auto *A = Mod.createPlaceholder(ElemKind::FloatTy,
+                                  {BatchSize, NumRows, NumCols}, "A", false);
+
+  auto *Exp = Mod.createPlaceholder(ElemKind::FloatTy, {NumRows, NumCols},
+                                    "exp", false);
+
+  TypeRef Ty = Mod.uniqueType(ElemKind::FloatTy, {NumRows, NumCols});
+  Node *BRA = F->createBatchedReduceAdd("BRA", Ty, A, 0 /*axis*/);
+  auto *Reg = F->createRegression("reg", BRA, Exp);
+  auto *Result = F->createSave("save", Reg);
+
+  Tensor Inputs(ElemKind::FloatTy, {{BatchSize, NumRows, NumCols}});
+  Tensor Outputs(ElemKind::FloatTy, {{NumRows, NumCols}});
+
+  auto InputsH = Inputs.getHandle<>();
+  auto OutputsH = Outputs.getHandle<>();
+
+  InputsH.randomize(-1, 1, Mod.getPRNG());
+  OutputsH.randomize(-1, 1, Mod.getPRNG());
+
+  performGradCheck(EE_, Bindings, Result, A, Exp, &Inputs, &Outputs, 0.001,
+                   0.01);
+}
+
+TEST_P(InterpreterGrad, gradientCheckBatchedReduceAddAxis1) {
+  PlaceholderBindings Bindings;
+  size_t NumRows = 3;
+  size_t BatchSize = 4;
+  size_t NumCols = 5;
+
+  auto &Mod = EE_.getModule();
+  Function *F = Mod.createFunction("main");
+
+  auto *A = Mod.createPlaceholder(ElemKind::FloatTy,
+                                  {NumRows, BatchSize, NumCols}, "A", false);
+
+  auto *Exp = Mod.createPlaceholder(ElemKind::FloatTy, {NumRows, NumCols},
+                                    "exp", false);
+
+  TypeRef Ty = Mod.uniqueType(ElemKind::FloatTy, {NumRows, NumCols});
+  Node *BRA = F->createBatchedReduceAdd("BRA", Ty, A, 1 /*axis*/);
+  auto *Reg = F->createRegression("reg", BRA, Exp);
+  auto *Result = F->createSave("save", Reg);
+
+  Tensor Inputs(ElemKind::FloatTy, {{NumRows, BatchSize, NumCols}});
+  Tensor Outputs(ElemKind::FloatTy, {{NumRows, NumCols}});
+
+  auto InputsH = Inputs.getHandle<>();
+  auto OutputsH = Outputs.getHandle<>();
+
+  InputsH.randomize(-1, 1, Mod.getPRNG());
+  OutputsH.randomize(-1, 1, Mod.getPRNG());
+
+  performGradCheck(EE_, Bindings, Result, A, Exp, &Inputs, &Outputs, 0.001,
+                   0.01);
+}
+
+TEST_P(InterpreterGrad, gradientCheckGatherVec) {
+  PlaceholderBindings Bindings;
+
+  auto &Mod = EE_.getModule();
+  Function *F = Mod.createFunction("main");
+
+  auto *A = Mod.createPlaceholder(ElemKind::FloatTy, {3, 4}, "A", false);
+  auto *Indices = Mod.createPlaceholder(ElemKind::Int64ITy, {2}, "I", false);
+  Bindings.allocate(Indices)->getHandle<int64_t>() = {0, 2};
+  auto *Exp = Mod.createPlaceholder(ElemKind::FloatTy, {2, 4}, "exp", false);
+
+  Node *G = F->createGather("gather", A, Indices, 0 /*batchDims*/);
+  auto *Reg = F->createRegression("reg", G, Exp);
+  auto *Result = F->createSave("save", Reg);
+
+  Tensor Inputs(ElemKind::FloatTy, {{3, 4}});
+  Tensor Outputs(ElemKind::FloatTy, {{2, 4}});
+
+  auto InputsH = Inputs.getHandle<>();
+  auto OutputsH = Outputs.getHandle<>();
+
+  InputsH.randomize(-1, 1, Mod.getPRNG());
+  OutputsH.randomize(-1, 1, Mod.getPRNG());
+
+  performGradCheck(EE_, Bindings, Result, A, Exp, &Inputs, &Outputs, 0.001,
+                   0.01);
+}
+
+TEST_P(InterpreterGrad, gradientCheckGatherDim) {
+  PlaceholderBindings Bindings;
+
+  auto &Mod = EE_.getModule();
+  Function *F = Mod.createFunction("main");
+
+  auto *A = Mod.createPlaceholder(ElemKind::FloatTy, {8, 4}, "A", false);
+  auto *Indices = Mod.createPlaceholder(ElemKind::Int64ITy, {2, 2}, "I", false);
+  Bindings.allocate(Indices)->getHandle<int64_t>() = {0, 2, 3, 1};
+  auto *Exp = Mod.createPlaceholder(ElemKind::FloatTy, {2, 2, 4}, "exp", false);
+
+  Node *G = F->createGather("gather", A, Indices, 0 /*batchDims*/);
+  auto *Reg = F->createRegression("reg", G, Exp);
+  auto *Result = F->createSave("save", Reg);
+
+  Tensor Inputs(ElemKind::FloatTy, {{8, 4}});
+  Tensor Outputs(ElemKind::FloatTy, {{2, 2, 4}});
+
+  auto InputsH = Inputs.getHandle<>();
+  auto OutputsH = Outputs.getHandle<>();
+
+  InputsH.randomize(-1, 1, Mod.getPRNG());
+  OutputsH.randomize(-1, 1, Mod.getPRNG());
+
+  performGradCheck(EE_, Bindings, Result, A, Exp, &Inputs, &Outputs, 0.001,
+                   0.01);
+}
+
 static void gradientCheckGroupConv(size_t depth, size_t group,
                                    ExecutionEngine &EE_) {
   PlaceholderBindings bindings;
@@ -236,6 +392,39 @@ TEST_P(GradCheck, gradientCheckDepthwiseConv) {
 }
 
 TEST_P(GradCheck, gradientCheckGroupConv) { gradientCheckGroupConv(4, 2, EE_); }
+
+static void gradientCheckDilatedConv(size_t depth, size_t group,
+                                     size_t dilation, ExecutionEngine &EE_) {
+  PlaceholderBindings bindings;
+  size_t numDim = 10;
+
+  auto &mod = EE_.getModule();
+  Function *F = mod.createFunction("main");
+  auto *A = mod.createPlaceholder(ElemKind::FloatTy, {1, numDim, numDim, depth},
+                                  "A", false);
+  auto *Ex = mod.createPlaceholder(ElemKind::FloatTy,
+                                   {1, numDim, numDim, depth}, "exp", false);
+
+  Node *O = F->createConv(bindings, "conv", A, depth, 2, 1, 1, group, dilation);
+  O = F->createRegression("reg", O, Ex);
+  auto *result = F->createSave("ret", O);
+
+  Tensor inputs(ElemKind::FloatTy, {1, numDim, numDim, depth});
+  Tensor outputs(ElemKind::FloatTy, {1, numDim, numDim, depth});
+
+  auto inputsH = inputs.getHandle<>();
+  auto outputsH = outputs.getHandle<>();
+
+  inputsH.randomize(-1, 1, mod.getPRNG());
+  outputsH.randomize(-1, 1, mod.getPRNG());
+
+  performGradCheck(EE_, bindings, result, A, Ex, &inputs, &outputs, 0.001,
+                   0.04);
+}
+
+TEST_P(GradCheck, gradientCheckDilatedConv) {
+  gradientCheckDilatedConv(1, 1, 2, EE_);
+}
 
 TEST_P(InterpreterGrad, gradientCheckAvgPool) {
   PlaceholderBindings bindings;
@@ -345,9 +534,9 @@ TEST_P(InterpreterGrad, gradientCheckArithmetic) {
   auto *C = mod.createPlaceholder(ElemKind::FloatTy, {1, numDim}, "C", false);
   auto *D = mod.createPlaceholder(ElemKind::FloatTy, {1, numDim}, "D", false);
   auto *E = mod.createPlaceholder(ElemKind::FloatTy, {1, numDim}, "E", false);
-  bindings.allocate(B);
-  bindings.allocate(C);
-  bindings.allocate(D);
+  bindings.allocate(B)->zero();
+  bindings.allocate(C)->zero();
+  bindings.allocate(D)->zero();
 
   // Randomize E to avoid div by zero.
   auto *ETensor = bindings.allocate(E);
@@ -535,16 +724,18 @@ TEST_P(InterpreterGrad, gradientCheckCrossEntropyLoss) {
   Function *F = mod.createFunction("main");
   auto *P =
       mod.createPlaceholder(ElemKind::FloatTy, {batchSize, 4}, "P", false);
-  bindings.allocate(P);
+  bindings.allocate(P)->zero();
   auto *Y =
       mod.createPlaceholder(ElemKind::Int64ITy, {batchSize}, "Labels", false);
-  bindings.allocate(Y);
+  bindings.allocate(Y)->zero();
   Node *CE = F->createCrossEntropyLoss("celoss", P, Y);
   auto *result = F->createSave("ret", CE);
   auto *LTensor = bindings.allocate(result->getPlaceholder());
 
   Tensor inputs(ElemKind::FloatTy, {batchSize, 4});
+  inputs.zero();
   Tensor outputs(ElemKind::Int64ITy, {batchSize});
+  outputs.zero();
 
   auto inputsH = inputs.getHandle();
   auto outputsH = outputs.getHandle<int64_t>();
@@ -589,11 +780,11 @@ TEST_P(InterpreterGrad, gradientCheckCrossEntropyLoss) {
 }
 
 INSTANTIATE_TEST_CASE_P(Interpreter, InterpreterGrad,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 
 INSTANTIATE_TEST_CASE_P(Interpreter, GradCheck,
-                        ::testing::Values(BackendKind::Interpreter));
+                        ::testing::Values("Interpreter"));
 
 #ifdef GLOW_WITH_CPU
-INSTANTIATE_TEST_CASE_P(JIT, GradCheck, ::testing::Values(BackendKind::CPU));
+INSTANTIATE_TEST_CASE_P(JIT, GradCheck, ::testing::Values("CPU"));
 #endif // GLOW_WITH_CPU

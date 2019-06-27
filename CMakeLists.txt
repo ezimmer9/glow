@@ -10,6 +10,7 @@ option(GLOW_WITH_LLVMIRCODEGEN "Build the LLVM-based code generation library" ON
 option(GLOW_WITH_OPENCL "Build the OpenCL backend" OFF)
 option(GLOW_WITH_HABANA "Build the Habana backend" OFF)
 option(GLOW_BUILD_EXAMPLES "Build the examples" ON)
+option(GLOW_BUILD_PYTORCH_INTEGRATION "Build integration for PyTorch" OFF)
 option(GLOW_BUILD_TESTS "Build the tests" ON)
 option(GLOW_WITH_BUNDLES "Build bundles" OFF)
 option(LINK_PROTOBUF_AS_DLL "Link against protobuf build as dynamic libray." OFF)
@@ -75,6 +76,22 @@ include_directories(${GLOW_SOURCE_DIR})
 file(GLOB_RECURSE header_files include/*.h tools/*.h lib/*.h)
 add_custom_target(CollectHeaders SOURCES ${header_files})
 
+find_package(Git)
+# Get the commit's short SHA1
+execute_process(COMMAND
+  "${GIT_EXECUTABLE}" log -1 --pretty=format:"%h"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  OUTPUT_VARIABLE GIT_SHA1
+  ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+add_definitions("-DGIT_SHA1=${GIT_SHA1}")
+# Get the date of the commit
+execute_process(COMMAND
+  "${GIT_EXECUTABLE}" log -1 --pretty=format:"%ad" --date=short
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  OUTPUT_VARIABLE GIT_DATE
+  ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+add_definitions("-DGIT_DATE=${GIT_DATE}")
+
 find_package(PNG)
 if(PNG_FOUND)
   add_definitions(-DWITH_PNG)
@@ -97,10 +114,22 @@ if (GLOW_WITH_OPENCL)
 endif ()
 
 if (GLOW_WITH_HABANA)
+  add_definitions(-DGLOW_WITH_HABANA=1)
+
+  # Find habanalabs libraries.
   list(APPEND CMAKE_PREFIX_PATH /usr/lib/habanalabs)
   find_path(SYNAPSE_INCLUDE_DIR synapse.h)
   find_library(SYNAPSE_LIB Synapse)
-  add_definitions(-DGLOW_WITH_HABANA=1)
+  find_library(TPCSIM_SHARED_LIB tpcsim_shared)
+  find_library(HL_THUNK_LIB hl-thunk)
+
+  # Create interface library to encapsulate necessary .so's.
+  add_library(Synapse INTERFACE)
+  target_link_libraries(Synapse
+    INTERFACE
+    "${SYNAPSE_LIB}"
+    "${TPCSIM_SHARED_LIB}"
+    "${HL_THUNK_LIB}")
 endif ()
 
 # Top level setup for external backends
@@ -146,6 +175,15 @@ add_subdirectory(tools)
 
 if (GLOW_BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+if (GLOW_BUILD_PYTORCH_INTEGRATION)
+  if(NOT EXISTS "${GLOW_THIRDPARTY_DIR}/pybind11")
+    message(FATAL_ERROR "No pybind11 git submodule. Run: git submodule update --init --recursive")
+  endif()
+
+  add_subdirectory(${GLOW_THIRDPARTY_DIR}/pybind11)
+  add_subdirectory(torch_glow/src)
 endif()
 
 if (GLOW_WITH_BUNDLES AND NOT GLOW_WITH_CPU)

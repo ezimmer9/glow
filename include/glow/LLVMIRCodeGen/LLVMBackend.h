@@ -16,8 +16,8 @@
 #ifndef GLOW_LLVMIRCODEGEN_LLVMBACKEND_H
 #define GLOW_LLVMIRCODEGEN_LLVMBACKEND_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/CompiledFunction.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/CompiledFunction.h"
 #include "glow/Base/Tensor.h"
 #include "glow/LLVMIRCodeGen/GlowJIT.h"
 
@@ -63,11 +63,12 @@ public:
   virtual std::unique_ptr<CompiledFunction>
   compileIRWithoutConstants(IRFunction *IR) const;
 
-  virtual std::unique_ptr<CompiledFunction>
+  virtual llvm::Expected<std::unique_ptr<CompiledFunction>>
   compile(Function *F, const BackendOptions &opts) const override;
 
   virtual void save(Function *F, llvm::StringRef outputDir,
-                    llvm::StringRef networkName) const override;
+                    llvm::StringRef bundleName,
+                    llvm::StringRef mainEntryName) const override;
   /// @}
 
   /// \returns the size of metrics collected for a single TraceEvent.

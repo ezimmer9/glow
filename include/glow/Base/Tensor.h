@@ -25,6 +25,7 @@
 #include "glow/Support/Random.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace glow {
 
@@ -35,6 +36,7 @@ namespace glow {
 template <class ElemTy> class Handle;
 
 class Tensor;
+class TensorPool;
 
 void genericTranspose(const Tensor *src, Tensor *dest,
                       llvm::ArrayRef<unsigned_t> shuffle);
@@ -65,15 +67,27 @@ private:
   /// If the tensor is unowned.
   bool isUnowned_{false};
 
+  /// The TensorPool that is managing this Tensor (if any).
+  TensorPool *tensorPool_{nullptr};
+
+  /// Size in bytes of the unpadded region memory. This is useful  communicating
+  /// the actual size of the data, this allows for copying only inputs and not
+  /// padding to the device.
+  size_t unpaddedSize_{0};
+
   template <class ElemTy> friend class Handle;
 
   /// \returns a pointer to the tensor data buffer.
   char *getData() const { return data_; }
 
+public:
   /// \returns true if it is an unowned tensor.
   bool isUnowned() const { return isUnowned_; }
 
-public:
+  /// \returns the size of the unpadded memory region. If unpaddedSize_ is not
+  /// set return the size of the entire payload.
+  size_t getUnpaddedSizeInBytes() const;
+
   /// \returns the type of the tensor.
   const Type &getType() const { return type_; }
 
@@ -107,15 +121,23 @@ public:
     case ElemKind::Int8QTy: {
       auto *data = reinterpret_cast<int8_t *>(getData());
       std::fill(&data[0], &data[0] + size(), (int8_t)type_.getOffset());
-    } break;
+      break;
+    }
+    case ElemKind::UInt8QTy: {
+      auto *data = reinterpret_cast<uint8_t *>(getData());
+      std::fill(&data[0], &data[0] + size(), (uint8_t)type_.getOffset());
+      break;
+    }
     case ElemKind::Int16QTy: {
       auto *data = reinterpret_cast<int16_t *>(getData());
       std::fill(&data[0], &data[0] + size(), (int16_t)type_.getOffset());
-    } break;
+      break;
+    }
     case ElemKind::Int32QTy: {
       auto *data = reinterpret_cast<int32_t *>(getData());
       std::fill(&data[0], &data[0] + size(), (int32_t)type_.getOffset());
-    } break;
+      break;
+    }
     case ElemKind::UInt8FusedQTy: {
       assert(dims().size() == 2 && "Fused tensor must be 2-dimensional.");
       assert(dims()[1] > 8 && "Fused tensor must have more than 8 columns.");
@@ -139,7 +161,8 @@ public:
         float zero = nearbyintf(-offset / scale);
         std::fill(&data[i * width], scaleOffsetPtr, static_cast<uint8_t>(zero));
       }
-    } break;
+      break;
+    }
     default:
       // Non-quantized tensors are set to 0.
       std::fill(&getData()[0], &getData()[0] + size() * type_.getElementSize(),
@@ -156,6 +179,10 @@ public:
 
   /// \returns the number of bytes required to store the tensor.
   uint64_t getSizeInBytes() const { return type_.getSizeInBytes(); }
+
+  /// \returns the TensorPool managing this object, or nullptr if it is
+  /// unmanaged.
+  TensorPool *getOwningPool() { return tensorPool_; }
 
   /// Initialize an empty tensor.
   Tensor() = default;
@@ -189,9 +216,11 @@ public:
 
   /// Construct an unowned tensor provided an existing payload buffer.
   /// This constructor can be used when there is a need to work with
-  /// "externally" managed payload buffers using Tensor APIs.
-  Tensor(void *data, TypeRef ty)
-      : data_(reinterpret_cast<char *>(data)), type_(*ty), isUnowned_{false} {
+  /// "externally" managed payload buffers using Tensor APIs. Additionally \p
+  /// unpaddedSize can be set to indicate actual size of the inputs.
+  Tensor(void *data, TypeRef ty, size_t unpaddedSize = 0)
+      : data_(reinterpret_cast<char *>(data)),
+        type_(*ty), isUnowned_{false}, unpaddedSize_{unpaddedSize} {
     // Mark as unowned.
     isUnowned_ = true;
   }
@@ -201,6 +230,12 @@ public:
          int32_t offset)
       : data_(nullptr), type_(elemTy, dims, scale, offset), isUnowned_{false} {
     reset(type_);
+  }
+
+  /// Allocate a new Tensor managed by the \p tensorPool.
+  explicit Tensor(TypeRef ty, TensorPool *tensorPool)
+      : data_(nullptr), type_(*ty), tensorPool_(tensorPool) {
+    reset(*ty);
   }
 
   Tensor(const Tensor &other) = delete;
@@ -242,6 +277,8 @@ public:
     unownedTensor.data_ = firstElemPtr;
     unownedTensor.isUnowned_ = true;
     unownedTensor.type_ = Type::newShape(getType(), dims);
+    unownedTensor.unpaddedSize_ = unpaddedSize_;
+
     if (offsets.size() == 0) {
       assert(size() == unownedTensor.size() && "The size of the unowned tensor "
                                                "should the same as the size of "
@@ -253,6 +290,16 @@ public:
                                                "size of the original tensor");
     }
     return unownedTensor;
+  }
+
+  /// This is the same as \ref getUnowned() but it produces an owned tensor
+  /// instead. \returns owned tensor copied from the data buffer of the current
+  /// tensor but having different dimensions \p dims. \p offsets represents an
+  /// optional offset into the tensor representing the location of the first
+  /// element to start a subview from.
+  Tensor getOwnedSlice(llvm::ArrayRef<size_t> dims,
+                       llvm::ArrayRef<size_t> offsets = {}) const {
+    return getUnowned(dims, offsets).clone();
   }
 
   /// Reset the shape and type of this tensor to match the shape and type of
@@ -275,7 +322,10 @@ public:
     // If the new size is identical to the allocated size then there is no need
     // to re-allocate the buffer.
     if (type_ == T && getData()) {
-      zero();
+#ifdef GLOW_DEBUG_TENSOR_INIT
+      PseudoRNG rng;
+      init(InitKind::Broadcast, GLOW_DEBUG_TENSOR_INIT, rng);
+#endif
       return;
     }
 
@@ -291,9 +341,20 @@ public:
     assert(size() > 0 && "Tensors must always have positive size.");
     size_t count = size() * type_.getElementSize();
     data_ = reinterpret_cast<char *>(alignedAlloc(count, TensorAlignment));
-    zero(getElementType() == ElemKind::UInt8FusedQTy);
-  }
 
+#ifdef GLOW_DEBUG_TENSOR_INIT
+    PseudoRNG rng;
+    init(InitKind::Broadcast, GLOW_DEBUG_TENSOR_INIT, rng);
+#endif
+  }
+  /// Releases the data buffer and sets the unOwned flag to true. This is useful
+  /// for keeping metadata around but not the actual contents.
+  void release() {
+    if (!isUnowned())
+      alignedFree(getData());
+
+    isUnowned_ = true;
+  }
   ~Tensor() {
     if (!isUnowned()) {
       alignedFree(getData());
@@ -305,6 +366,8 @@ public:
     std::swap(data_, other.data_);
     std::swap(type_, other.type_);
     std::swap(isUnowned_, other.isUnowned_);
+    std::swap(tensorPool_, other.tensorPool_);
+    std::swap(unpaddedSize_, other.unpaddedSize_);
   }
 
   /// Move assignment operator.
@@ -312,12 +375,38 @@ public:
     std::swap(data_, other.data_);
     std::swap(type_, other.type_);
     std::swap(isUnowned_, other.isUnowned_);
+    std::swap(tensorPool_, other.tensorPool_);
+    std::swap(unpaddedSize_, other.unpaddedSize_);
     return *this;
   }
 
+  /// Dump a textual representation of the Tensor into provided output stream.
+  void dump(llvm::raw_ostream &os) const;
+
+  /// Dump a textual representation of the Tensor into default output stream.
+  void dump() const;
+
+  /// Dump a textual representation of a specific number of elements in the
+  /// Tensor into provided output stream.
+  void dump(llvm::raw_ostream &os, unsigned maxNumElem) const;
+
+  /// Dump a textual representation of a specific number of elements in the
+  /// Tensor into default output stream.
+  void dump(unsigned maxNumElem) const;
+
+  /// Dump a textual representation of the Tensor to std::string.
+  std::string toString() const;
+
+  /// Dump a textual representation of a specific number of elements in the
+  /// Tensor to std::string.
+  std::string toString(unsigned maxNumElem) const;
+
   /// \returns true if the content of the other tensor \p other is identical to
-  /// this one.
-  bool isEqual(const Tensor &other, float allowedError = 0.0001) const {
+  /// this one, given some \p allowedError. If \p verbose and the tensors are
+  /// not equal, then we will log information about the mismatch (number of
+  /// elements exceeding allowed error; maximum error and location found; etc.).
+  bool isEqual(const Tensor &other, float allowedError = 0.0001,
+               bool verbose = true) const {
     if (other.dims() != dims()) {
       return false;
     }
@@ -335,38 +424,44 @@ public:
 
     switch (getElementType()) {
     case ElemKind::FloatTy:
-      return isEqualImpl<float>(other, allowedError);
+      return isEqualImpl<float>(other, allowedError, verbose);
     case ElemKind::Float16Ty:
-      return isEqualImpl<float16_t>(other, allowedError);
+      return isEqualImpl<float16_t>(other, allowedError, verbose);
     case ElemKind::Int8QTy:
       assert(getType().getScale() == other.getType().getScale() &&
              "Scales must match.");
       assert(getType().getOffset() == other.getType().getOffset() &&
              "Offsets must match.");
-      return isEqualImpl<int8_t>(other, allowedError);
+      return isEqualImpl<int8_t>(other, allowedError, verbose);
+    case ElemKind::UInt8QTy:
+      assert(getType().getScale() == other.getType().getScale() &&
+             "Scales must match.");
+      assert(getType().getOffset() == other.getType().getOffset() &&
+             "Offsets must match.");
+      return isEqualImpl<uint8_t>(other, allowedError, verbose);
     case ElemKind::Int16QTy:
       assert(getType().getScale() == other.getType().getScale() &&
              "Scales must match.");
       assert(getType().getOffset() == other.getType().getOffset() &&
              "Offsets must match.");
-      return isEqualImpl<int16_t>(other, allowedError);
+      return isEqualImpl<int16_t>(other, allowedError, verbose);
     case ElemKind::Int32QTy:
       assert(getType().getScale() == other.getType().getScale() &&
              "Scales must match.");
       assert(getType().getOffset() == other.getType().getOffset() &&
              "Offsets must match.");
-      return isEqualImpl<int32_t>(other, allowedError);
+      return isEqualImpl<int32_t>(other, allowedError, verbose);
     case ElemKind::Int32ITy:
-      return isEqualImpl<int32_t>(other, allowedError);
+      return isEqualImpl<int32_t>(other, allowedError, verbose);
     case ElemKind::Int64ITy:
-      return isEqualImpl<int64_t>(other, allowedError);
+      return isEqualImpl<int64_t>(other, allowedError, verbose);
       // Note: We can use isEqualImpl() here because the scales/offsets will be
       // compared as if they were data, so we will return false if any rowwise
       // scale/offset do not match.
     case ElemKind::UInt8FusedQTy:
-      return isEqualImpl<uint8_t>(other, allowedError);
+      return isEqualImpl<uint8_t>(other, allowedError, verbose);
     case ElemKind::BoolTy:
-      return isEqualImpl<bool>(other, allowedError);
+      return isEqualImpl<bool>(other, allowedError, verbose);
     }
 
     // This is to make compiler happy. It can never reach this point as switch
@@ -452,7 +547,7 @@ public:
 
   /// Transpose the tensor \p src into the empty tensor \p dest. Shuffle the
   /// axis based on the list \p shuffle, where each element is the src index.
-  void transpose(Tensor *dest, llvm::ArrayRef<unsigned_t> shuffle) {
+  void transpose(Tensor *dest, llvm::ArrayRef<unsigned_t> shuffle) const {
     genericTranspose(this, dest, shuffle);
   }
 
@@ -488,18 +583,37 @@ private:
   }
 
   template <class ElemTy>
-  bool isEqualImpl(const Tensor &other, float allowedError) const {
+  bool isEqualImpl(const Tensor &other, float allowedError,
+                   bool verbose) const {
     auto const *myData = getRawDataPointer<ElemTy>();
     auto const *otherData = other.getRawDataPointer<ElemTy>();
+    double maxFoundError = 0.0;
+    size_t maxFoundErrorIdx = 0, numExceedingError = 0;
     for (size_t i = 0, e = size(); i < e; i++) {
       double delta = myData[i] - otherData[i];
+      delta = std::abs(delta);
       // Since any comparison with NAN returns false, we use a negated condition
       // so that this function correctly returns false when delta is NAN.
-      if (!(std::abs(delta) <= allowedError)) {
-        return false;
+      if (!(delta <= allowedError)) {
+        if (!verbose) {
+          return false;
+        }
+        numExceedingError += 1;
+        if (!(delta <= maxFoundError)) {
+          maxFoundError = delta;
+          maxFoundErrorIdx = i;
+        }
       }
     }
-    return true;
+    if (numExceedingError != 0) {
+      LOG(INFO) << "Tensors not equal: " << numExceedingError << " out of "
+                << size() << " elements exceeded allowed error threshold "
+                << allowedError << ". Maximum error found was " << maxFoundError
+                << " at index " << maxFoundErrorIdx << ": "
+                << myData[maxFoundErrorIdx] << " vs. "
+                << otherData[maxFoundErrorIdx];
+    }
+    return numExceedingError == 0;
   }
 };
 
@@ -812,7 +926,7 @@ public:
     assert(low >= std::numeric_limits<ElemTy>::lowest() &&
            high <= std::numeric_limits<ElemTy>::max() &&
            "Cannot initialize outside range of representable values.");
-    std::uniform_int_distribution<int> dist(low, high);
+    std::uniform_int_distribution<long long> dist(low, high);
     switch (getElementType()) {
     default: {
       for (auto &elem : *this) {
@@ -933,7 +1047,7 @@ private:
         // Construct the coordinates for the slice and for the joint shape.
         // Add the 'offset' to the dimension that we concat the shapes on.
         sliceCoor[d] = i;
-        // If this is the correct axis to insert multiple times then calcuate
+        // If this is the correct axis to insert multiple times then calculate
         // the additional offset to use.
         const size_t countAxisOffset = (axis == d) ? c * slice.dims()[d] : 0;
         fusedCoor[d] = i + offset[d] + countAxisOffset;
@@ -954,6 +1068,9 @@ template <class ElemTy> const Handle<ElemTy> Tensor::getHandle() const & {
   return Handle<ElemTy>(const_cast<Tensor *>(this));
 }
 
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Tensor &t);
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Tensor *t);
 } // namespace glow
 
 #endif // GLOW_BASE_TENSOR_H

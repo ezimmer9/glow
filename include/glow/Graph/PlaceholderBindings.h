@@ -16,7 +16,7 @@
 #ifndef GLOW_BASE_PLACEHOLDERBINDINGS_H
 #define GLOW_BASE_PLACEHOLDERBINDINGS_H
 
-#include "glow/Backends/TraceEvents.h"
+#include "glow/ExecutionContext/TraceEvents.h"
 #include "llvm/ADT/ArrayRef.h"
 
 #include <list>
@@ -67,6 +67,9 @@ public:
   /// Inserts the Placeholder-Tensor pair.
   void insert(Placeholder *P, Tensor &&T);
 
+  /// Inserts the Placeholder-Tensor pair. This takes ownership of the Tensor.
+  void insert(Placeholder *P, Tensor *T);
+
   /// Allocates a tensor to back the placeholder \p P. The new tensor has the
   /// type of P.
   Tensor *allocate(Placeholder *P);
@@ -87,6 +90,10 @@ public:
   /// Deletes all tensors and clears the mapping between Placeholders and
   /// tensors.
   void clear();
+
+  /// Removes the Tensor backing Placeholder \p P;
+  /// \p P must be a valid Placeholder registered in the bindings.
+  void erase(Placeholder *P);
 
   /// \returns a copy of the PlaceholderBindings, with each placeholder mapped
   /// to a new Tensor, with their own memory.

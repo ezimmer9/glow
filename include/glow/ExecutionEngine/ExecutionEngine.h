@@ -16,14 +16,13 @@
 #ifndef GLOW_EXECUTIONENGINE_EXECUTIONENGINE_H
 #define GLOW_EXECUTIONENGINE_EXECUTIONENGINE_H
 
-#include "glow/Backends/Backend.h"
-#include "glow/Backends/CompiledFunction.h"
+#include "glow/Backend/Backend.h"
+#include "glow/Backend/CompiledFunction.h"
 #include "glow/Backends/DeviceManager.h"
 #include "glow/Base/Train.h"
 #include "glow/Base/Traits.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Graph/PlaceholderBindings.h"
-#include "glow/Optimizer/Optimizer.h"
 
 #include "llvm/ADT/ArrayRef.h"
 
@@ -60,13 +59,13 @@ class ExecutionEngine final {
                    CompiledFunction &compiledFunction);
 
 public:
-  ExecutionEngine(BackendKind backendKind = BackendKind::Interpreter);
+  ExecutionEngine(llvm::StringRef backend = "Interpreter");
 
   ~ExecutionEngine();
 
-  /// Set the code generator kind to \p backendKind. New code will be generated
+  /// Set the code generator to \p backend. New code will be generated
   /// using this backend.
-  void setBackend(BackendKind backendKind);
+  void setBackend(llvm::StringRef backend);
 
   /// Set the code generator to a custom \p backend. If \p ownsBackend is false
   /// then ExecutionEngine will use the given backend without owning it which
@@ -105,21 +104,12 @@ public:
   /// then the function will be added to the collection of previously compiled
   /// functions otherwise any previously compiled functions will be removed
   /// first. This method should be invoked before the run method.
-  void compile(Function *F, const CompilationContext &cctx,
+  void compile(Function *F, CompilationContext &cctx,
                bool clearOtherFunctions = true);
 
   /// A convenience function for the most common type of compile.
   void compile(CompilationMode mode, Function *F,
                bool clearOtherFunctions = true);
-
-  /// Save a bundle for a standalone execution given \p cctx. This method takes
-  /// care of everything when preparing the bundle for saving. There is no need
-  /// to invoke the compile method before it.
-  /// Make \p networkName the function name for
-  /// the entry point of the network and prepend all generated
-  /// files with this name.
-  void save(Function *F, const CompilationContext &cctx,
-            llvm::StringRef outputDir, llvm::StringRef networkName);
 
   /// Context aware single execution of a function. If more than one
   /// function has been compiled by this ExecutionEngine then a name must be

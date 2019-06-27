@@ -18,7 +18,7 @@
 #include "CPUFunction.h"
 #include "CPULLVMIRGen.h"
 
-#include "glow/Backends/BackendUtils.h"
+#include "glow/Backend/BackendUtils.h"
 #include "glow/Graph/Graph.h"
 #include "glow/IR/Instrs.h"
 #include "glow/LLVMIRCodeGen/LLVMIRGen.h"
@@ -71,10 +71,24 @@ bool CPUBackend::isOpSupported(const NodeInfo &NI) const {
     // Concat ==> Splat + Insert. Both only support the following.
   case Kinded::Kind::ConcatNodeKind:
   case Kinded::Kind::SplatNodeKind:
-  case Kinded::Kind::TransposeNodeKind:
   case Kinded::Kind::SliceNodeKind:
+  case Kinded::Kind::SpaceToDepthNodeKind:
     return NI.allInputsAndOutputsHaveSameElemKind(
         {ElemKind::FloatTy, ElemKind::Int8QTy, ElemKind::Int64ITy});
+
+  case Kinded::Kind::TransposeNodeKind:
+    return NI.allInputsAndOutputsHaveSameElemKind(
+        {ElemKind::FloatTy, ElemKind::Int8QTy, ElemKind::Int64ITy,
+         ElemKind::BoolTy});
+
+  case Kinded::Kind::SparseLengthsSumNodeKind:
+    return NI.allInputsAndOutputsHaveSameElemKind(
+               {ElemKind::FloatTy}, {SparseLengthsSumNode::IndicesIdx,
+                                     SparseLengthsSumNode::LengthsIdx}) &&
+           (NI.getInElemTy(SparseLengthsSumNode::IndicesIdx) ==
+            ElemKind::Int64ITy) &&
+           (NI.getInElemTy(SparseLengthsSumNode::LengthsIdx) ==
+            ElemKind::Int32ITy);
 
   case Kinded::Kind::SparseLengthsWeightedSumNodeKind:
     return NI.allInputsAndOutputsHaveSameElemKind(
@@ -124,6 +138,7 @@ bool CPUBackend::isOpSupported(const NodeInfo &NI) const {
                 RowwiseQuantizedSparseLengthsWeightedSumNode::ResultIdx) ==
             ElemKind::FloatTy);
 
+  case Kinded::Kind::LengthsRangeFillNodeKind:
   case Kinded::Kind::LengthsToRangesNodeKind:
     return NI.allInputsAndOutputsHaveSameElemKind({ElemKind::Int32ITy});
 
@@ -141,6 +156,7 @@ bool CPUBackend::isOpSupported(const NodeInfo &NI) const {
   case Kinded::Kind::LogNodeKind:
   case Kinded::Kind::TanhNodeKind:
   case Kinded::Kind::SigmoidNodeKind:
+  case Kinded::Kind::ExpNodeKind:
     return NI.allInputsAndOutputsHaveSameElemKind({ElemKind::FloatTy});
 
   case Kinded::Kind::ConvolutionNodeKind:
@@ -306,9 +322,13 @@ bool CPUBackend::isOpSupported(const NodeInfo &NI) const {
 }
 
 bool CPUBackend::shouldLower(const Node *N) const {
-  if (N->getKind() == Kinded::Kind::ConvolutionNodeKind)
+  switch (N->getKind()) {
+  case Kinded::Kind::ConvolutionNodeKind:
+  case Kinded::Kind::SparseLengthsSumNodeKind:
     return false;
-  return true;
+  default:
+    return true;
+  }
 }
 
 std::unique_ptr<CompiledFunction> CPUBackend::createCompiledFunction(

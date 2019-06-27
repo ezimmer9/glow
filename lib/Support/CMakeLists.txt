@@ -2,10 +2,11 @@ add_library(Support
               Debug.cpp
               Error.cpp
               Random.cpp
-              Support.cpp)
+              Support.cpp
+              ThreadPool.cpp)
 target_link_libraries(Support
                       PUBLIC
-                        LLVMSupport)
+                        LLVMSupport
+                        glog::glog)
 
-add_library(ThreadPool
-              ThreadPool.cpp)
+add_subdirectory(TensorPool)

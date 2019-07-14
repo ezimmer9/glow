@@ -99,23 +99,84 @@ void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
               << "python ../glow/utils/download_test_db.py -d fr2en\n";
     exit(1);
   }
+  file.close();
+  if (false){
+	  float *f_ptr = (float *)result.getUnsafePtr();
+	  for (int i = 0 ; i < 100 ; i++){
+		  std::cout << i << ": " <<
+				  f_ptr[2000+i] << ", ";
+  }
+  }
+}
+
+/// Loads tensor of floats from binary file.
+void loadMatrixAndTransposeFromFile(llvm::StringRef filename, Tensor &result) {
+	if (result.dims().size() != 2){
+		std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
+		exit(1);
+	}
+	Tensor src(ElemKind::FloatTy, {result.dims()[0], result.dims()[1]});
+	Tensor dst(ElemKind::FloatTy, {result.dims()[1], result.dims()[0]});
+	std::ifstream file(filename.str(), std::ios::binary);
+	assert(file.is_open() == true);
+	metadata meta;
+	meta.read_from_file(file);
+	if (!file.read(src.getUnsafePtr(), result.size() * sizeof(float))) {
+		std::cout << "Error: only " << file.gcount() << " could be read\n";
+		std::cout << "Error reading file: " << filename.str() << '\n'
+				<< "Need to be downloaded by calling:\n"
+				<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+		exit(1);
+	}
+	src.transpose(&dst , {1,0});
+	std::memcpy(result.getUnsafePtr(), dst.getUnsafePtr(), result.size());
+	file.close();
 }
 
 /// Loads tensor of floats from binary file.
 void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *> result, uint numOfSlices) {
-  std::ifstream file(filename.str(), std::ios::binary);
-  assert(file.is_open() == true);
-  metadata meta;
-  meta.read_from_file(file);
-  for (uint i = 0 ; i < numOfSlices ; ++i){
-	  if (!file.read(result[i]->getPayload().getUnsafePtr(), meta.m_size[0]/numOfSlices * sizeof(float))) {
-		  std::cout << "Error: only " << file.gcount() << " could be read\n";
-		  std::cout << "Error reading file: " << filename.str() << '\n'
-				  << "Need to be downloaded by calling:\n"
-				  << "python ../glow/utils/download_test_db.py -d fr2en\n";
-		exit(1);
-	  }
-  }
-  //std::cout << *(float *)(result[0]->getPayload().getUnsafePtr());
-  //std::cout << " ****** End loadMatrixAndSplitFromFile ******\n" ;
+	std::ifstream file(filename.str(), std::ios::binary);
+	assert(file.is_open() == true);
+	metadata meta;
+	meta.read_from_file(file);
+	int file_size = 1;
+	for (auto size : meta.m_size){
+		file_size = file_size * size;
+	}
+	for (uint i = 0 ; i < numOfSlices ; i++){
+		if (result[i]->dims().size() == 2){
+			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
+				std::cout << "Error: only " << file.gcount() << " could be read\n";
+				std::cout << "Error reading file: " << filename.str() << '\n'
+					<< "Need to be downloaded by calling:\n"
+					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				exit(1);
+			}
+			if (false){
+				std::cout << "******************src*************\n";
+				for (uint i = 0 ; i < result[i]->dims()[0] ; i++){
+					for (uint j= 0 ; j < result[i]->dims()[1] ; j++){
+						std::cout <<i << " " << j << ":" <<
+								result[i]->getHandle<float_t>().at({i , j}) << " ";
+					}
+					std::cout << "\n";
+				}
+				std::cout << "\n\n";
+			}
+		}
+		else if (result[i]->dims().size() == 1){
+		std::cout << result[i]->getDebugDesc();
+			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
+				std::cout << "Error: only " << file.gcount() << " could be read\n";
+				std::cout << "Error reading file: " << filename.str() << '\n'
+					<< "Need to be downloaded by calling:\n"
+					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				exit(1);
+			}
+		}
+	}
+	file.close();
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr());
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr() + 4);
+//  std::cout << " ****** End loadMatrixAndSplitFromFile ******\n" ;
 }

@@ -8,6 +8,7 @@
 #define EXAMPLES_EN2GR_MODEL_MODEL_H_
 
 #include "glow/ExecutionEngine/ExecutionEngine.h"
+#include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
 #include "glow/Graph/Graph.h"
 #include "glow/Quantization/Quantization.h"
 #include "glow/Quantization/Serialization.h"
@@ -25,21 +26,31 @@
 #include <vector>
 using namespace glow;
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
 const unsigned ENCODER_LSTMS_NUM = 4;
 const unsigned DECODER_LSTMS_NUM = 4;
-const unsigned MAX_LENGTH = 3;
+const unsigned MAX_LENGTH = 4;
 const unsigned EMBEDDING_SIZE =/* 256;*/  1024;
 const unsigned HIDDEN_SIZE = /*EMBEDDING_SIZE * 3;*/ 1024;
 const uint LSTM_LEVELS = 4;
-const std::string files_indices[LSTM_LEVELS] = {"f" , "i" , "o" , "c" };
+const std::string files_indices[LSTM_LEVELS] = {"i" , "f" , "g" , "o" };
+const int64_t PAD = 0;
+const int64_t UNK = 1;
+const int64_t BOS = 2;
+const int64_t EOS = 3;
 
 
-extern llvm::cl::opt<BackendKind> ExecutionBackend;
+extern llvm::cl::opt<std::string> ExecutionBackend;
 extern llvm::cl::opt<unsigned> batchSizeOpt;
 extern llvm::cl::OptionCategory debugCat;
 extern llvm::cl::OptionCategory quantizationCat;
 extern llvm::cl::OptionCategory en2grCat;
 extern llvm::cl::opt<std::string> dumpGraphDAGFileOpt;
+extern llvm::cl::opt<bool> debugMode;
 
 
 struct Vocabulary {
@@ -72,11 +83,12 @@ struct Model {
   Placeholder *output_;
   PlaceholderBindings bindings;
   LoweredInfoMap loweredMap_;
+  std::vector<std::pair<ElemKind ,Placeholder *>> map_debug;
 
   void loadLanguages();
   void loadTokens();
   void loadEncoder();
-  std::vector<Node *> loadAttention(std::vector<Node *> AttentionQuery);
+  NodeValue loadAttention(Node *AttentionQuery);
   void loadDecoder();
   void translate(const std::vector<std::string> &batch);
 
@@ -96,8 +108,12 @@ private:
   Placeholder *loadEmbedding(llvm::StringRef langPrefix, size_t langSize);
   void loadEncoderWieghts();
   void loadEncoderBiases();
+  void loadDecoderWieghts();
+  void loadDecoderBiases();
 };
 
-
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #endif /* EXAMPLES_EN2GR_MODEL_MODEL_H_ */

@@ -57,13 +57,13 @@ target_link_libraries(fr2en
                         LLVMSupport)
 
 add_executable(en2gr
-                 en2gr.cpp)
+                 en2gr.cpp en2gr-model/model.cpp)
 target_link_libraries(en2gr
                       PRIVATE
                         Base
                         ExecutionEngine
                         IR
-                        Optimizer
+                        GraphOptimizer
                         Quantization
                         Support
                         LLVMSupport)

@@ -29,6 +29,13 @@ int main(int argc, char **argv){
 	    seq2seq.dumpGraphDAG(dumpGraphDAGFileOpt.c_str());
 	}
 
+	if (debugMode){
+		std::vector<std::string> debug = {"They are"};
+		seq2seq.translate(debug);
+		return 0;
+
+	}
+
 	std::vector<std::string> batch;
 	do {
 		std::cout << "Please enter a sentence in English " << std::endl;

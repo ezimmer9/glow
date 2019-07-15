@@ -134,7 +134,7 @@ void Model::loadEncoder(){
 	std::vector<NodeValue> lstm0Concat;
 	for (uint i=0 ; i < hidenOutputs0.size() ; i++){
 		Node *concat = F_->createConcat("encoder."+std::to_string(i)+".concat",
-				{hidenOutputs0[i], oppHidenOutputs0[i]},1);
+				{hidenOutputs0[i], oppHidenOutputs0[MAX_LENGTH-1-i]},1);
 		NodeValue concatNV(concat);
 		lstm0Concat.push_back(concatNV);
 	}

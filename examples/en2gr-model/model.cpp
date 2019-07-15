@@ -78,8 +78,7 @@ void Model::loadLanguages(){
 
 void Model::loadTokens(){
 	std::printf("*** loadTokens ***\n\n");
-	tok_.loadVocabularyFromFile("/home/ezimmer9/Desktop/glow/examples/en2gr-model/vocab.bpe.32000");
-	std::cout << "**************************" << tok_.index2word_.size() << "\n";
+	tok_.loadVocabularyFromFile("../examples/en2gr-model/vocab.bpe.32000");
 	embedding_tok_ = loadEmbedding("encoder.embedder.weight", tok_.index2word_.size()+4);
 }
 

@@ -105,7 +105,7 @@ void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
 	  for (int i = 0 ; i < 100 ; i++){
 		  std::cout << i << ": " <<
 				  f_ptr[2000+i] << ", ";
-  }
+	  }
   }
 }
 

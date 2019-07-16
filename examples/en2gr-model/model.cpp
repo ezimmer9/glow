@@ -218,20 +218,21 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	std::printf("*** loadAttention ***\n\n");
 
 	auto &mod = EE_.getModule();
-	auto Wa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
+	auto *Wa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.1.Wfc1_keys" , false);
-	loadMatrixAndTransposeFromFile("en2gr/decoder.att_rnn.attn.linear_k.weight.bin", *bindings.allocate(Wa));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_k.weight.bin", *bindings.allocate(Wa));
 
-	auto Bwa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+	auto *Bwa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
 				"attention.1.Bfc1_keys" , false);
 	//no bias here - so allocate as zero
 	bindings.allocate(Bwa)->zero();
 
-	auto Ua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
+	auto *Ua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.2.Wfc2_query" , false);
-	loadMatrixAndTransposeFromFile("en2gr/decoder.att_rnn.attn.linear_q.weight.bin", *bindings.allocate(Ua));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_q.weight.bin", *bindings.allocate(Ua));
 
-	auto Bua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
+
+	auto *Bua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
 			"attention.2.Bfc2_query" , false);
 	//no bias here - so allocate as zero
 	bindings.allocate(Bua)->zero();
@@ -257,11 +258,17 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	/* ************************************************************* */
 
 	// this is instead of fullyconnected that support only 2 dimentions.
+	Node *BroadKeyW = F_->createBroadcast("attention.BroadKeyW",
+			Wa , {batchSize_, HIDDEN_SIZE , HIDDEN_SIZE} , 1);
+	auto *EncoderOutTranspoae = F_->createTranspose("attention.encoder.transpose",
+			encoderHiddenOutput_ , {0 ,2 ,1});
 	Node *BroadKeys = F_->createBatchMatMul("attention.broadkeys",
-			encoderHiddenOutput_,Wa);
+			BroadKeyW , EncoderOutTranspoae);
+	auto *MatMulKeyTranspose = F_->createTranspose("attention.matmul.transpose",
+			BroadKeys , {0 , 2 ,1});
 	Node *BroadForAdd = F_->createBroadcast("attention.BroadForAdd",
 			Bwa , {batchSize_, MAX_LENGTH , HIDDEN_SIZE} , 2);
-	Node *AddKeys = F_->createAdd("attention.addkeys", BroadKeys, BroadForAdd);
+	Node *AddKeys = F_->createAdd("attention.addkeys", MatMulKeyTranspose, BroadForAdd);
 	//debug_size_print(AddKeys);
 	/* ****************************END****************************** */
 
@@ -270,15 +277,23 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	/*                    Query Fully Connected                       */
 	/* ************************************************************* */
 	Node *QueryExpand = F_->createExpandDims("attention.expandquery",
-			AttentionQuery, {1});;
+			AttentionQuery, {1});
 	//debug_size_print(QueryExpand);
+	auto *QueryTranspose = F_->createTranspose("attention.query.transpose",
+			QueryExpand , {0,2,1});
+
+	Node *BroadQureyW = F_->createBroadcast("attention.BroadQurey",
+			Ua , {batchSize_, HIDDEN_SIZE , HIDDEN_SIZE} , 1);
 
 	// this is instead of fullyconected that support only 2 dimentions.
 	Node *MatMulQuery = F_->createBatchMatMul("attention.Mat.Mul.query",
-			QueryExpand ,Ua);
+			BroadQureyW ,QueryTranspose);
+	auto *MatMulQueryTranspose = F_->createTranspose("attention.matmul.transpose",
+			MatMulQuery , {0 , 2 ,1});
+
 	Node *BroadForQureAdd = F_->createBroadcast("attention.BroadForQureAdd",
 			Bua , {batchSize_, 1 , HIDDEN_SIZE} , 2);
-	Node *AddQuery = F_->createAdd("attention.addquery", MatMulQuery, BroadForQureAdd);
+	Node *AddQuery = F_->createAdd("attention.addquery", MatMulQueryTranspose, BroadForQureAdd);
 	//debug_size_print(AddQuery);
 	auto vect = [](Node *AddQuery){
 		std::vector<NodeValue> vec;
@@ -353,9 +368,12 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	//debug_size_print(Asoftmax);
 
 	Node *SoftmaxReshape = F_->createReshape("attention.softmax.reshape",
-			Asoftmax , {batchSize_, querySize , keySize});
+			Asoftmax , {batchSize_, keySize});
 	//debug_size_print(SoftmaxReshape);
-	Node *Bmm = F_->createBatchMatMul("attention.bmm", SoftmaxReshape , encoderHiddenOutput_);
+	auto *SoftmaxExpand = F_->createExpandDims("attention.softmax.expanddims",
+			SoftmaxReshape , {1});
+	debug_size_print(SoftmaxExpand);
+	Node *Bmm = F_->createBatchMatMul("attention.bmm", SoftmaxExpand , encoderHiddenOutput_);
 	//debug_size_print(Bmm);
 	Node *bmmReshape = F_->createReshape("attention.bmm.reshape", Bmm ,
 			{batchSize_*querySize, HIDDEN_SIZE});
@@ -400,8 +418,8 @@ void Model::loadDecoder(){
 
 
 	Placeholder *classifier_w = mod.createPlaceholder(ElemKind::FloatTy,
-			{EMBEDDING_SIZE , tok_.index2word_.size()+4}, "decoder.classifier_w", false);
-	loadMatrixAndTransposeFromFile("en2gr/decoder.classifier.classifier.weight.bin", *bindings.allocate(classifier_w));
+			{tok_.index2word_.size()+4 ,EMBEDDING_SIZE}, "decoder.classifier_w", false);
+	loadMatrixFromFile("en2gr/decoder.classifier.classifier.weight.bin", *bindings.allocate(classifier_w));
 
 	Placeholder *classifier_b = mod.createPlaceholder(ElemKind::FloatTy,
 				{tok_.index2word_.size()+4}, "decoder.classifier_w", false);
@@ -459,7 +477,7 @@ void Model::loadDecoder(){
 		currentOut.clear();
 		for (uint i=0 ; i < hidenOutputs1.size() ; i++){
 			// concat 1  - concat lstm1 with attentionout
-			currentOut.push_back(F_->createConcat("decoder."+std::to_string(i)+".concat",
+			currentOut.push_back(F_->createConcat("decoder1."+std::to_string(i)+".concat",
 					{hidenOutputs1[i], attentionOut[i]},1));
 		}
 
@@ -477,7 +495,7 @@ void Model::loadDecoder(){
 		currentOut.clear();
 		for (uint i=0 ; i < addResidual1.size() ; i++){
 			// concat 2 - concat addResidual1 with attentionout
-			currentOut.push_back(F_->createConcat("decoder."+std::to_string(i)+".concat",
+			currentOut.push_back(F_->createConcat("decoder2."+std::to_string(i)+".concat",
 					{addResidual1[i], attentionOut[i]},1));
 		}
 
@@ -502,15 +520,24 @@ void Model::loadDecoder(){
 		// TODO: think how to avoid the last allocation for dec_seq
 
 		// classifier
-		Node *ClassifierW = F_->createFullyConnected("decoder.classifier.w",
-				addResidual2[word_inx] , classifier_w, classifier_b);
+		auto *tmpDecoderOut = F_->createTranspose("tmp.decoder.out",
+				addResidual2[word_inx],{1,0});
+
+		auto *ClassifierMatMul = F_->createMatMul("decoder.classifier.matmul",
+				NodeValue(classifier_w) , NodeValue(tmpDecoderOut));
+		//debug_size_print(ClassifierMatMul);
+		auto *classifierBExpand = F_->createExpandDims("decoder.classifier.expand",
+				(Node *)classifier_b , {1});
+		//debug_size_print(classifierBExpand);
+		auto *ClassifierAdd = F_->createAdd("decoder.classifier.add",
+				ClassifierMatMul , classifierBExpand);
 		//debug_size_print(ClassifierW);
-//		Node *ClassifierWT = F_->createTranspose("decoder.classifier.transpose" ,
-//				ClassifierW , {1,0});
+		Node *ClassifierWT = F_->createTranspose("decoder.classifier.transpose" ,
+				ClassifierAdd , {1,0});
 		addResidual2.clear();
 
 		// softmax
-		Node *DecSM = F_->createSoftMax("decoder.softmax", ClassifierW, S);
+		Node *DecSM = F_->createSoftMax("decoder.softmax", ClassifierWT, S);
 		//debug_size_print(DecSM);
 		// topk
 		auto *topK = F_->createTopK("decoder.topK", DecSM, 1);
@@ -580,7 +607,7 @@ void Model::translate(const std::vector<std::string> &batch){
 
 			if (i)
 				std::cout << ' ';
-				std::cout << wordIdx << ": " << tok_.index2word_[wordIdx+4];
+				std::cout << wordIdx << ": " << tok_.index2word_[wordIdx-4];
 		}
 		std::cout << "\n\n";
 	}

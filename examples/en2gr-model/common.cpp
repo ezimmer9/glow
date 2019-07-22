@@ -21,6 +21,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+const size_t NUM_TRACE = 2;
 using namespace glow;
 
 struct metadata{
@@ -94,9 +95,7 @@ void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
   meta.read_from_file(file);
   if (!file.read(result.getUnsafePtr(), result.size() * sizeof(float))) {
 	  std::cout << "Error: only " << file.gcount() << " could be read\n";
-	  std::cout << "Error reading file: " << filename.str() << '\n'
-			  << "Need to be downloaded by calling:\n"
-              << "python ../glow/utils/download_test_db.py -d fr2en\n";
+	  std::cout << "Error reading file: " << filename.str() << '\n';
     exit(1);
   }
   file.close();
@@ -115,22 +114,66 @@ void loadMatrixAndTransposeFromFile(llvm::StringRef filename, Tensor &result) {
 		std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
 		exit(1);
 	}
-	Tensor src(ElemKind::FloatTy, {result.dims()[0], result.dims()[1]});
-	Tensor dst(ElemKind::FloatTy, {result.dims()[1], result.dims()[0]});
+	Tensor src(ElemKind::FloatTy, {result.dims()[1], result.dims()[0]});
+	Tensor dst(ElemKind::FloatTy, {result.dims()[0], result.dims()[1]});
 	std::ifstream file(filename.str(), std::ios::binary);
 	assert(file.is_open() == true);
 	metadata meta;
 	meta.read_from_file(file);
 	if (!file.read(src.getUnsafePtr(), result.size() * sizeof(float))) {
 		std::cout << "Error: only " << file.gcount() << " could be read\n";
-		std::cout << "Error reading file: " << filename.str() << '\n'
-				<< "Need to be downloaded by calling:\n"
-				<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+		std::cout << "Error reading file: " << filename.str() << '\n';
 		exit(1);
 	}
 	src.transpose(&dst , {1,0});
-	std::memcpy(result.getUnsafePtr(), dst.getUnsafePtr(), result.size());
+	std::memcpy(result.getUnsafePtr(), dst.getUnsafePtr(), result.size()*sizeof(float));
 	file.close();
+}
+
+/// Loads tensor of floats from binary file.
+void loadMatrixAndSplitAndTransposeFromFile(llvm::StringRef filename, std::vector<Constant *> result, uint numOfSlices) {
+	std::ifstream file(filename.str(), std::ios::binary);
+	assert(file.is_open() == true);
+	metadata meta;
+	meta.read_from_file(file);
+	size_t file_size = 1;
+	for (auto size : meta.m_size){
+		file_size = file_size * size;
+	}
+
+	Tensor src(ElemKind::FloatTy,
+			{result[0]->dims()[1] * numOfSlices,
+			 result[0]->dims()[0]});
+	Tensor dst(ElemKind::FloatTy,
+			{result[0]->dims()[0],
+			 result[0]->dims()[1] * numOfSlices});
+	if (!file.read(src.getUnsafePtr(), file_size * sizeof(float))) {
+		std::cout << "Error: only " << file.gcount() << " could be read\n";
+		std::cout << "Error reading file: " << filename.str() << '\n';
+		exit(1);
+	}
+	src.transpose(&dst , {1,0});
+//	for (int i = 1; i < 5 ; i++){
+//		for (int j = 1; j < 5 ; j++){
+//			std::cout << src.getHandle<float_t>().at({i,j}) <<  " "
+//					<< dst.getHandle<float_t>().at({j,i}) << "\n";
+//		}
+//	}
+
+
+	for (uint i = 0 ; i < numOfSlices ; i++){
+		if (result[i]->dims().size() != 2){
+			std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
+			exit(1);
+		}
+		std::memcpy(result[i]->getPayload().getUnsafePtr(),
+				dst.getUnsafePtr() + i*(file_size/numOfSlices)*sizeof(float),
+				(file_size/numOfSlices)*sizeof(float));
+	}
+	file.close();
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr());
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr() + 4);
+//  std::cout << " ****** End loadMatrixAndSplitFromFile ******\n" ;
 }
 
 /// Loads tensor of floats from binary file.
@@ -147,9 +190,7 @@ void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *
 		if (result[i]->dims().size() == 2){
 			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
 				std::cout << "Error: only " << file.gcount() << " could be read\n";
-				std::cout << "Error reading file: " << filename.str() << '\n'
-					<< "Need to be downloaded by calling:\n"
-					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
 				exit(1);
 			}
 			if (false){
@@ -168,9 +209,7 @@ void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *
 		std::cout << result[i]->getDebugDesc();
 			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
 				std::cout << "Error: only " << file.gcount() << " could be read\n";
-				std::cout << "Error reading file: " << filename.str() << '\n'
-					<< "Need to be downloaded by calling:\n"
-					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
 				exit(1);
 			}
 		}

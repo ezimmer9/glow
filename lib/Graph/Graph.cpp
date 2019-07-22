@@ -2630,31 +2630,47 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
   assert(inputSize > 0 && "input dimensionality is zero");
 
   // Initialize the hidden and cell states to zero.
+//  Placeholder *HInit =
+//      getParent()->createPlaceholder(ElemKind::FloatTy, {batchSize,hiddenSize},
+//                                     "initial_hidden_state", false);
+
   Placeholder *HInit =
       getParent()->createPlaceholder(ElemKind::FloatTy, {hiddenSize,batchSize},
                                      "initial_hidden_state", false);
   bindings.allocate(HInit)->zero();
   Node *Ht = HInit;
 
+//  Placeholder *CInit = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {batchSize,hiddenSize}, "initial_cell_state", false);
+
   Placeholder *CInit = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, batchSize}, "initial_cell_state", false);
+      ElemKind::FloatTy, {hiddenSize,batchSize}, "initial_cell_state", false);
   bindings.allocate(CInit)->zero();
   Node *Ct = CInit;
 
   // Forget gate:
-  //    f_t <- sigmoid(Wif * x^T + Whf * h + bf)
+  //    f_t <- sigmoid([Wif * x^T + bif] + [Whf * h_t + bhf])
   // Input gate:
-  //    i_t <- sigmoid(Wii * x^T + Whi * h + bi)
+  //    i_t <- sigmoid([Wii * x^T + bii] + [Whi * h_t + bhi])
   // Output gate:
-  //    o_t <- sigmoid(Wio * x^T + Who * h + bi)
+  //    o_t <- sigmoid([Wio * x^T + bio] + [Who * h_t + bho])
   // Gated
-  //    g_t <- tanh(Wig  * x^T + Whg * h + bc)
+  //    g_t <- tanh([Wig  * x^T + big] + [Whg * h_t + bhg])
   // Cell state:
   //    c_t <- f_t (mul) c_(t-1) + i_t (mul) g_t
   // Hidden state:
   //    h <- o_t (mul) tanh(c_t)
 
   // forget gate
+//  Placeholder *Wif = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {inputSize, hiddenSize}, nameBase + ".Wif", true);
+//  Placeholder *Whf = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whf", true);
+//  Placeholder *Bif = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bif", true);
+//  Placeholder *Bhf = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhf", true);
+
   Placeholder *Wif = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wif", true);
   Placeholder *Whf = getParent()->createPlaceholder(
@@ -2669,42 +2685,69 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
   bindings.allocate(Bhf);
 
   // input gate
+//  Placeholder *Wii = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wii", true);
+//  Placeholder *Whi = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", true);
+//  Placeholder *Bii = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bii", true);
+//  Placeholder *Bhi = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhi", true);
+
   Placeholder *Wii = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wii", true);
+      ElemKind::FloatTy, {hiddenSize, inputSize}, nameBase + ".Wii", true);
   Placeholder *Whi = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", true);
   Placeholder *Bii = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize ,1}, nameBase + ".Bii", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bii", true);
   Placeholder *Bhi = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bhi", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhi", true);
   bindings.allocate(Wii);
   bindings.allocate(Whi);
   bindings.allocate(Bii);
   bindings.allocate(Bhi);
 
   // output gate
+//  Placeholder *Wio = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wio", true);
+//  Placeholder *Who = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", true);
+//  Placeholder *Bio = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bio", true);
+//  Placeholder *Bho = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bho", true);
+
   Placeholder *Wio = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wio", true);
   Placeholder *Who = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", true);
   Placeholder *Bio = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bio", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bio", true);
   Placeholder *Bho = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bho", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bho", true);
   bindings.allocate(Wio);
   bindings.allocate(Who);
   bindings.allocate(Bio);
   bindings.allocate(Bho);
 
   // cell state
+//  Placeholder *Wig = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wig", true);
+//  Placeholder *Whg = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", true);
+//  Placeholder *Big = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Big", true);
+//  Placeholder *Bhg = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhg", true);
+
   Placeholder *Wig = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wig", true);
   Placeholder *Whg = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", true);
   Placeholder *Big = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Big", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Big", true);
   Placeholder *Bhg = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bhg", true);
+      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhg", true);
   bindings.allocate(Wig);
   bindings.allocate(Whg);
   bindings.allocate(Big);
@@ -2718,15 +2761,21 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto add1Name = nameBase + ".add1." + std::to_string(t);
     auto sigmoid1Name = nameBase + ".sigmoid1." + std::to_string(t);
 
-//    auto *Ft = createSigmoid(
+//    Node *Ft = createSigmoid(
 //        sigmoid1Name,
-//        createAdd(add1Name, createFullyConnected(fc1Name, Ht, Whf, Bif),
-//                  createFullyConnected(fc2Name, inputs[t], Wif, Bhf)));
+//        createAdd(add1Name, createFullyConnected(fc1Name, Ht, Whf , Bhf),
+//                  createFullyConnected(fc2Name, inputs[t], Wif, Bif)));
+    Node *WifTranspose = createTranspose("temp.transpose" , NodeValue(Wif) , {1,0});
+    Node *BifReshape = createReshape("temp.reshape" , NodeValue(Bif), {hiddenSize});
+    Node *FCtest = createFullyConnected(fc2Name , inputs[t] , (Storage *)WifTranspose,
+    		(Storage *)BifReshape);
+    Node *FCtestTranspose = createTranspose("FC.Transpose", FCtest , {1,0});
+
     auto *MatMulFt = createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
     auto *MatMulFtinput = createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
-    auto *Ft = createSigmoid(
+    Node *Ft = createSigmoid(
         sigmoid1Name,
-        createAdd(add1Name, createAdd(fc1Name, MatMulFtinput, Bif),
+        createAdd(add1Name, createAdd(fc1Name, FCtestTranspose, Bif),
         		createAdd(fc2Name, MatMulFt, Bhf)));
 
     auto fc3Name = nameBase + ".fc3." + std::to_string(t);
@@ -2734,10 +2783,11 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto add2Name = nameBase + ".add2." + std::to_string(t);
     auto sigmoid2Name = nameBase + ".sigmoid2." + std::to_string(t);
 
-//    auto *It = createSigmoid(
+//    Node *It = createSigmoid(
 //        sigmoid2Name,
-//        createAdd(add2Name, createFullyConnected(fc3Name, Ht, Whi, Bii),
-//                  createFullyConnected(fc4Name, inputs[t], Wii, Bhi)));
+//        createAdd(add2Name, createFullyConnected(fc3Name, Ht, Whi, Bhi),
+//                  createFullyConnected(fc4Name, inputs[t], Wii, Bii)));
+
     auto *MatMulIt = createMatMul(fc3Name, NodeValue(Whi),NodeValue(Ht));
     auto *MatMulItinput = createMatMul(fc4Name, NodeValue(Wii),NodeValue(InputTranspose));
     auto *It = createSigmoid(
@@ -2750,10 +2800,11 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto add3Name = nameBase + ".add3." + std::to_string(t);
     auto sigmoid3Name = nameBase + ".sigmoid3." + std::to_string(t);
 
-//    auto *Ot = createSigmoid(
+//    Node *Ot = createSigmoid(
 //        sigmoid3Name,
-//        createAdd(add3Name, createFullyConnected(fc5Name, Ht, Who, Bio),
-//                  createFullyConnected(fc6Name, inputs[t], Wio, Bho)));
+//        createAdd(add3Name, createFullyConnected(fc5Name, Ht, Who, Bho),
+//                  createFullyConnected(fc6Name, inputs[t], Wio, Bio)));
+
     auto *MatMulOt = createMatMul(fc5Name, NodeValue(Who),NodeValue(Ht));
     auto *MatMulOtinput = createMatMul(fc6Name, NodeValue(Wio),NodeValue(InputTranspose));
     auto *Ot = createSigmoid(
@@ -2766,10 +2817,11 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto add4Name = nameBase + ".add4." + std::to_string(t);
     auto tanh1Name = nameBase + ".tanh1." + std::to_string(t);
 
-//    auto *Ot = createTanh(
+//    Node *Gt = createTanh(
 //    tanh1Name,
-//    createAdd(add4Name, createFullyConnected(fc7Name, Ht, Who, Big),
-//    			createFullyConnected(fc8Name, inputs[t], Wio, Bhg)));
+//    createAdd(add4Name, createFullyConnected(fc7Name, Ht, Whg, Bhg),
+//    			createFullyConnected(fc8Name, inputs[t], Wig, Big)));
+
     auto *MatMulGt = createMatMul(fc7Name, NodeValue(Whg),NodeValue(Ht));
     auto *MatMulGtinput = createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
     auto *Gt = createTanh(

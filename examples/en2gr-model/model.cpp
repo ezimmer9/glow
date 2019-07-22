@@ -92,7 +92,7 @@ void Model::loadEncoder(){
 	auto &mod = EE_.getModule();
 
 	input_ = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, MAX_LENGTH}, "encoder.inputsentence", false);
-	bindings.allocate(input_);
+	(*context.getPlaceholderBindings()).allocate(input_);
 
 	Node *inputEmbedded =
 	   F_->createGather("encoder.embedding", embedding_tok_, input_);
@@ -125,10 +125,10 @@ void Model::loadEncoder(){
 	enc_seq__.clear();
 
 	// Bi-Directional LSTM.
-	F_->createInferPytorchLSTM(bindings, "encoder.lstm0", enc_seq ,
+	F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "encoder.lstm0", enc_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
 
-	F_->createInferPytorchLSTM(bindings, "encoder.opp.lstm", opposite_seq ,
+	F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "encoder.opp.lstm", opposite_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, oppHidenOutputs0);
 
 	std::vector<NodeValue> lstm0Concat;
@@ -142,10 +142,10 @@ void Model::loadEncoder(){
 	// ---------------- end Bi-Directional LSTM --------------
 
 	// lstm 1
-	F_->createInferPytorchLSTM(bindings,"encoder.lstm1",lstm0Concat ,
+	F_->createInferPytorchLSTM(*context.getPlaceholderBindings(),"encoder.lstm1",lstm0Concat ,
 			batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
 	// lstm 2
-	F_->createInferPytorchLSTM(bindings,"encoder.lstm2",hidenOutputs1 ,
+	F_->createInferPytorchLSTM(*context.getPlaceholderBindings(),"encoder.lstm2",hidenOutputs1 ,
 			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs2);
 
 	// add 0
@@ -157,7 +157,7 @@ void Model::loadEncoder(){
 	}
 
 	// lstm 3
-	F_->createInferPytorchLSTM(bindings,"encoder.lstm3",hiddenOut2 ,
+	F_->createInferPytorchLSTM(*context.getPlaceholderBindings(),"encoder.lstm3",hiddenOut2 ,
 			batchSize_, HIDDEN_SIZE  , HIDDEN_SIZE, hidenOutputs3);
 
 	// add 1
@@ -183,7 +183,7 @@ void Model::loadEncoder(){
 	//  *******************************************************
 //	auto *test = mod.getPlaceholderByName("encoder_inputsentence");
 //	//  convert all placeholders to constants except test
-//	::convertPlaceholdersToConstants(F_ , bindings , {test});
+//	::convertPlaceholdersToConstants(F_ , *context.getPlaceholderBindings() , {test});
 //	ConstList consts = F_->findConstants();
 //	for (auto con : consts){
 //		std::cout << "constant: " << con->getName().str ()<< "\n";
@@ -220,32 +220,32 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	auto &mod = EE_.getModule();
 	auto *Wa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.1.Wfc1_keys" , false);
-	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_k.weight.bin", *bindings.allocate(Wa));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_k.weight.bin", *(*context.getPlaceholderBindings()).allocate(Wa));
 
 	auto *Bwa = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
 				"attention.1.Bfc1_keys" , false);
 	//no bias here - so allocate as zero
-	bindings.allocate(Bwa)->zero();
+	(*context.getPlaceholderBindings()).allocate(Bwa)->zero();
 
 	auto *Ua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE , HIDDEN_SIZE},
 			"attention.2.Wfc2_query" , false);
-	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_q.weight.bin", *bindings.allocate(Ua));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_q.weight.bin", *(*context.getPlaceholderBindings()).allocate(Ua));
 
 
 	auto *Bua = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE},
 			"attention.2.Bfc2_query" , false);
 	//no bias here - so allocate as zero
-	bindings.allocate(Bua)->zero();
+	(*context.getPlaceholderBindings()).allocate(Bua)->zero();
 
 	Placeholder *Vt = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "attention.Vt", false);
 	Node *NVt = Vt;
-	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_att.bin", *bindings.allocate(Vt));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.linear_att.bin", *(*context.getPlaceholderBindings()).allocate(Vt));
 
 	Placeholder *NormBias = mod.createPlaceholder(ElemKind::FloatTy, {HIDDEN_SIZE}, "norm_bias", false);
-	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.normalize_bias.bin", *bindings.allocate(NormBias));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.normalize_bias.bin", *(*context.getPlaceholderBindings()).allocate(NormBias));
 
 	Placeholder *NormScalar = mod.createPlaceholder(ElemKind::FloatTy, {1}, "norm_scalar", false);
-	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.normalize_scalar.bin", *bindings.allocate(NormScalar));
+	loadMatrixFromFile("en2gr/decoder.att_rnn.attn.normalize_scalar.bin", *(*context.getPlaceholderBindings()).allocate(NormScalar));
 
 	Placeholder *SM = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, MAX_LENGTH , 1}, "attention.softmax.ph", false);
 
@@ -269,6 +269,8 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	Node *BroadForAdd = F_->createBroadcast("attention.BroadForAdd",
 			Bwa , {batchSize_, MAX_LENGTH , HIDDEN_SIZE} , 2);
 	Node *AddKeys = F_->createAdd("attention.addkeys", MatMulKeyTranspose, BroadForAdd);
+
+	//Node *KeyFC = F_->createFullyConnected("attention.keys.fc",);
 	//debug_size_print(AddKeys);
 	/* ****************************END****************************** */
 
@@ -395,7 +397,7 @@ void Model::loadDecoder(){
 	for (uint i=0 ; i < MAX_LENGTH ; i++){
 		Placeholder *hiddenInit = mod.createPlaceholder(ElemKind::Int64ITy,
 				{batchSize_}, "decoder."+std::to_string(i)+".hiddenInit", false);
-		auto *inputTensor = bindings.allocate(hiddenInit);
+		auto *inputTensor = (*context.getPlaceholderBindings()).allocate(hiddenInit);
 		for (size_t j = 0; j < batchSize_; j++) {
 			inputTensor->getHandle<int64_t>().at({j}) = BOS;
 		}
@@ -404,13 +406,13 @@ void Model::loadDecoder(){
 
 		Placeholder *hiddenInitEmbed = mod.createPlaceholder(ElemKind::FloatTy,
 				{batchSize_, EMBEDDING_SIZE}, "decoder."+std::to_string(i)+".hiddenInitEmbed", false);
-		bindings.allocate(hiddenInitEmbed)->zero();
+		(*context.getPlaceholderBindings()).allocate(hiddenInitEmbed)->zero();
 		Node *seqInitEmbed = hiddenInitEmbed;
 		dec_seq_embedding.push_back(seqInitEmbed);
 
 		Placeholder *attentionInint = mod.createPlaceholder(ElemKind::FloatTy,
 				{batchSize_, HIDDEN_SIZE}, "attentionInit."+std::to_string(i)+".hiddenInitEmbed", false);
-		bindings.allocate(attentionInint)->zero();
+		(*context.getPlaceholderBindings()).allocate(attentionInint)->zero();
 		Node *attentionInit_ = attentionInint;
 		NodeValue temp(attentionInit_);
 		attentionOut.push_back(temp);
@@ -418,12 +420,16 @@ void Model::loadDecoder(){
 
 
 	Placeholder *classifier_w = mod.createPlaceholder(ElemKind::FloatTy,
-			{tok_.index2word_.size()+4 ,EMBEDDING_SIZE}, "decoder.classifier_w", false);
-	loadMatrixFromFile("en2gr/decoder.classifier.classifier.weight.bin", *bindings.allocate(classifier_w));
+			{EMBEDDING_SIZE ,tok_.index2word_.size()+4}, "decoder.classifier_w", false);
+	loadMatrixAndTransposeFromFile("en2gr/decoder.classifier.classifier.weight.bin", *(*context.getPlaceholderBindings()).allocate(classifier_w));
+//	Placeholder *classifier_w = mod.createPlaceholder(ElemKind::FloatTy,
+//			{tok_.index2word_.size()+4 ,EMBEDDING_SIZE}, "decoder.classifier_w", false);
+//	loadMatrixFromFile("en2gr/decoder.classifier.classifier.weight.bin", *(*context.getPlaceholderBindings()).allocate(classifier_w));
+
 
 	Placeholder *classifier_b = mod.createPlaceholder(ElemKind::FloatTy,
 				{tok_.index2word_.size()+4}, "decoder.classifier_w", false);
-	loadMatrixFromFile("en2gr/decoder.classifier.classifier.bias.bin", *bindings.allocate(classifier_b));
+	loadMatrixFromFile("en2gr/decoder.classifier.classifier.bias.bin", *(*context.getPlaceholderBindings()).allocate(classifier_b));
 
 	Placeholder *S = mod.createPlaceholder(ElemKind::Int64ITy, {batchSize_, 1}, "S", false);
 
@@ -451,7 +457,7 @@ void Model::loadDecoder(){
 		dec_seq_embedding[word_inx] = decoderEmbeddedNV;
 
 		// lstm 0
-		F_->createInferPytorchLSTM(bindings, "decoder.lstm.0."+std::to_string(word_inx), dec_seq_embedding ,
+		F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "decoder.lstm.0."+std::to_string(word_inx), dec_seq_embedding ,
 				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs0);
 
 		for (uint i = 0 ; i < hidenOutputs0.size() ; ++i){
@@ -471,7 +477,7 @@ void Model::loadDecoder(){
 		}
 
 		// lstm 1
-		F_->createInferPytorchLSTM(bindings, "decoder.lstm.1."+std::to_string(word_inx), currentOut ,
+		F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "decoder.lstm.1."+std::to_string(word_inx), currentOut ,
 				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs1);
 
 		currentOut.clear();
@@ -482,7 +488,7 @@ void Model::loadDecoder(){
 		}
 
 		//lstm 2
-		F_->createInferPytorchLSTM(bindings, "decoder.lstm.2."+std::to_string(word_inx), currentOut ,
+		F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "decoder.lstm.2."+std::to_string(word_inx), currentOut ,
 				batchSize_, HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs2);
 
 		// add residual 0 - lstm2 + attention-out
@@ -500,7 +506,7 @@ void Model::loadDecoder(){
 		}
 
 		// lstm 3
-		F_->createInferPytorchLSTM(bindings, "decoder.lstm.3."+std::to_string(word_inx), currentOut , batchSize_,
+		F_->createInferPytorchLSTM(*context.getPlaceholderBindings(), "decoder.lstm.3."+std::to_string(word_inx), currentOut , batchSize_,
 				 HIDDEN_SIZE , HIDDEN_SIZE, hidenOutputs3);
 
 
@@ -520,24 +526,13 @@ void Model::loadDecoder(){
 		// TODO: think how to avoid the last allocation for dec_seq
 
 		// classifier
-		auto *tmpDecoderOut = F_->createTranspose("tmp.decoder.out",
-				addResidual2[word_inx],{1,0});
-
-		auto *ClassifierMatMul = F_->createMatMul("decoder.classifier.matmul",
-				NodeValue(classifier_w) , NodeValue(tmpDecoderOut));
-		//debug_size_print(ClassifierMatMul);
-		auto *classifierBExpand = F_->createExpandDims("decoder.classifier.expand",
-				(Node *)classifier_b , {1});
-		//debug_size_print(classifierBExpand);
-		auto *ClassifierAdd = F_->createAdd("decoder.classifier.add",
-				ClassifierMatMul , classifierBExpand);
-		//debug_size_print(ClassifierW);
-		Node *ClassifierWT = F_->createTranspose("decoder.classifier.transpose" ,
-				ClassifierAdd , {1,0});
+		auto *ClasiffierFC = F_->createFullyConnected("decoder.classifier.fc",
+				addResidual2[word_inx] , classifier_w , classifier_b);
+		//debug_size_print(ClasiffierFC);
 		addResidual2.clear();
 
 		// softmax
-		Node *DecSM = F_->createSoftMax("decoder.softmax", ClassifierWT, S);
+		Node *DecSM = F_->createSoftMax("decoder.softmax", ClasiffierFC, S);
 		//debug_size_print(DecSM);
 		// topk
 		auto *topK = F_->createTopK("decoder.topK", DecSM, 1);
@@ -564,7 +559,7 @@ void Model::loadDecoder(){
 	                                  {MAX_LENGTH, batchSize_});
 	auto *save = F_->createSave("decoder.output", reshape);
 	output_ = save->getPlaceholder();
-	bindings.allocate(output_);
+	(*context.getPlaceholderBindings()).allocate(output_);
 }
 
 void Model::translate(const std::vector<std::string> &batch){
@@ -595,14 +590,14 @@ void Model::translate(const std::vector<std::string> &batch){
 	    input.getHandle<int64_t>().at({j, words.size()+1}) = EOS ;
 	    std::cout << "EOS: " << ": " << input.getHandle<int64_t>().at({j, words.size()+1}) << "\n";
 	  }
-	updateInputPlaceholders(bindings, {input_}, {&input});
-	EE_.run(bindings);
+	updateInputPlaceholders(*(context.getPlaceholderBindings()), {input_}, {&input});
+	EE_.run(context);
 
-	auto OH = bindings.get(output_)->getHandle<int64_t>();
+	auto OH = context.getPlaceholderBindings()->get(output_)->getHandle<int64_t>();
 	for (unsigned j = 0; j < batch.size(); j++) {
 		for (unsigned i = 0; i < MAX_LENGTH; i++) {
 			int64_t wordIdx = (int64_t)OH.at({i, j});
-			if (wordIdx == tok_.word2index_["EOS"])
+			if (wordIdx == 3)
 				break;
 
 			if (i)
@@ -612,9 +607,14 @@ void Model::translate(const std::vector<std::string> &batch){
 		std::cout << "\n\n";
 	}
 
+	if (debugMode){
+		std::vector<TraceEvent>& events = context.getTraceContext()->getTraceEvents();
+		TraceEvent::dumpTraceEvents(events, "glow-trace.json", "glow");
+	}
+
 	if (!dumpProfileFileOpt.empty()) {
 		std::vector<NodeQuantizationInfo> QI =
-	        quantization::generateNodeQuantizationInfos(bindings, F_, loweredMap_);
+	        quantization::generateNodeQuantizationInfos(*context.getPlaceholderBindings(), F_, loweredMap_);
 		serializeToYaml(dumpProfileFileOpt, QI);
 	}
 }
@@ -624,10 +624,8 @@ Placeholder *Model::loadEmbedding(llvm::StringRef langPrefix, size_t langSize) {
 	  auto *result =
 			  mod.createPlaceholder(ElemKind::FloatTy, {langSize, EMBEDDING_SIZE},
 					  "embedding." + langPrefix.str(), false);
-	  auto test = bindings.allocate(result);
-	  loadMatrixFromFile("en2gr/" + langPrefix.str() + "_embedding.bin",
-                       *test);
-
+	  auto test = (*context.getPlaceholderBindings()).allocate(result);
+	  loadMatrixFromFile("en2gr/" + langPrefix.str() + "_embedding.bin",*test);
 	  return result;
 }
 
@@ -655,19 +653,23 @@ void Model::loadEncoderWieghts(){
 
 			}
 		}
+		//loadMatrixAndSplitAndTransposeFromFile(
 	   	loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_hh_l0.bin" ,
 				ConstVecH , LSTM_LEVELS);
 	   	ConstVecH.clear();
+	   	//loadMatrixAndSplitAndTransposeFromFile(
 	   	loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_ih_l0.bin" ,
 				ConstVecX , LSTM_LEVELS);
 	   	ConstVecX.clear();
 	   	if (j == 0){
+	   		//loadMatrixAndSplitAndTransposeFromFile(
 	   		loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
 					ConstVecOppH , LSTM_LEVELS);
 		   	ConstVecOppH.clear();
+		   	//loadMatrixAndSplitAndTransposeFromFile(
 		   	loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
 					ConstVecOppX , LSTM_LEVELS);
@@ -744,20 +746,24 @@ void Model::loadDecoderWieghts(){
 				ConstVecX.push_back(ConstX);
 			}
 			if (j == 0){
+				//loadMatrixAndSplitAndTransposeFromFile(
 				loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
+				//loadMatrixAndSplitAndTransposeFromFile(
 				loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
 				ConstVecX.clear();
 			}
 			else{
+				//loadMatrixAndSplitAndTransposeFromFile(
 				loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
+				//loadMatrixAndSplitAndTransposeFromFile(
 				loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
@@ -816,7 +822,10 @@ void Model::compile() {
 	std::printf("*** compile ***\n\n");
 
 
-    CompilationContext cctx{&bindings, &loweredMap_};
+    CompilationContext cctx{&*context.getPlaceholderBindings(), &loweredMap_};
+    if (debugMode){
+    	cctx.backendOpts.autoInstrument = true;
+    }
     PrecisionConfiguration &precConfig = cctx.precisionConfig;
 
     if (!dumpProfileFileOpt.empty()) {
@@ -836,13 +845,7 @@ void Model::compile() {
     	std::vector<Placeholder *> debugVec;
     	debugVec.push_back(input_);
     	debugVec.push_back(output_);
-    	if (debugMode){
-    		for (auto ph: map_debug){
-    			debugVec.push_back(ph.second);
-    			std::cout << ph.second->getName().str() << "\n";
-    		}
-    	}
-    	::glow::convertPlaceholdersToConstants(F_, bindings, debugVec);
+    	::glow::convertPlaceholdersToConstants(F_, *context.getPlaceholderBindings(), debugVec);
     }
 //    ConstList consts = F_->findConstants();
 //    	for (auto con : consts){
@@ -852,6 +855,7 @@ void Model::compile() {
     loadEncoderBiases();
     loadDecoderWieghts();
     loadDecoderBiases();
+    context.setTraceContext(llvm::make_unique<TraceContext>(TraceLevel::STANDARD));
     EE_.compile(F_, cctx);
 //    FunctionList debug = EE_.getModule().getFunctions();
 //    for (auto F : debug){

@@ -140,35 +140,29 @@ void loadMatrixAndSplitAndTransposeFromFile(llvm::StringRef filename, std::vecto
 	for (auto size : meta.m_size){
 		file_size = file_size * size;
 	}
-
-	Tensor src(ElemKind::FloatTy,
-			{result[0]->dims()[1] * numOfSlices,
-			 result[0]->dims()[0]});
-	Tensor dst(ElemKind::FloatTy,
-			{result[0]->dims()[0],
-			 result[0]->dims()[1] * numOfSlices});
-	if (!file.read(src.getUnsafePtr(), file_size * sizeof(float))) {
-		std::cout << "Error: only " << file.gcount() << " could be read\n";
-		std::cout << "Error reading file: " << filename.str() << '\n';
-		exit(1);
-	}
-	src.transpose(&dst , {1,0});
-//	for (int i = 1; i < 5 ; i++){
-//		for (int j = 1; j < 5 ; j++){
-//			std::cout << src.getHandle<float_t>().at({i,j}) <<  " "
-//					<< dst.getHandle<float_t>().at({j,i}) << "\n";
-//		}
-//	}
-
-
 	for (uint i = 0 ; i < numOfSlices ; i++){
 		if (result[i]->dims().size() != 2){
 			std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
 			exit(1);
 		}
-		std::memcpy(result[i]->getPayload().getUnsafePtr(),
-				dst.getUnsafePtr() + i*(file_size/numOfSlices)*sizeof(float),
-				(file_size/numOfSlices)*sizeof(float));
+		if (result[i]->dims().size() == 2){
+			Tensor src(ElemKind::FloatTy, {result[i]->dims()[1],result[i]->dims()[0]});
+			Tensor dst(ElemKind::FloatTy, {(result[i]->dims()[0]),result[i]->dims()[1]});
+			if (!file.read(src.getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
+				std::cout << "Error: only " << file.gcount() << " could be read\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
+				exit(1);
+			}
+			src.transpose(&dst , {1,0});
+//			for (int i = 1; i < 5 ; i++){
+//				for (int j = 1; j < 5 ; j++){
+//					std::cout << src.getHandle<float_t>().at({i,j}) <<  " "
+//							<< dst.getHandle<float_t>().at({j,i}) << "\n";
+//				}
+//			}
+			std::memcpy(result[i]->getPayload().getUnsafePtr(),
+					dst.getUnsafePtr(), (file_size/numOfSlices)*sizeof(float));
+		}
 	}
 	file.close();
 //  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr());

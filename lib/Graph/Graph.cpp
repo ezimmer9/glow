@@ -2662,92 +2662,92 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
   //    h <- o_t (mul) tanh(c_t)
 
   // forget gate
-//  Placeholder *Wif = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {inputSize, hiddenSize}, nameBase + ".Wif", true);
-//  Placeholder *Whf = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whf", true);
-//  Placeholder *Bif = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bif", true);
-//  Placeholder *Bhf = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhf", true);
-
   Placeholder *Wif = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wif", true);
+      ElemKind::FloatTy, {inputSize, hiddenSize}, nameBase + ".Wif", true);
   Placeholder *Whf = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whf", true);
   Placeholder *Bif = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bif", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bif", true);
   Placeholder *Bhf = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhf", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhf", true);
+
+//  Placeholder *Wif = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wif", true);
+//  Placeholder *Whf = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whf", true);
+//  Placeholder *Bif = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bif", true);
+//  Placeholder *Bhf = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhf", true);
   bindings.allocate(Wif);
   bindings.allocate(Whf);
   bindings.allocate(Bif);
   bindings.allocate(Bhf);
 
   // input gate
-//  Placeholder *Wii = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wii", true);
-//  Placeholder *Whi = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", true);
-//  Placeholder *Bii = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bii", true);
-//  Placeholder *Bhi = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhi", true);
-
   Placeholder *Wii = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize, inputSize}, nameBase + ".Wii", true);
+      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wii", true);
   Placeholder *Whi = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", true);
   Placeholder *Bii = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bii", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bii", true);
   Placeholder *Bhi = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhi", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhi", true);
+
+//  Placeholder *Wii = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, inputSize}, nameBase + ".Wii", true);
+//  Placeholder *Whi = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", true);
+//  Placeholder *Bii = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bii", true);
+//  Placeholder *Bhi = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhi", true);
   bindings.allocate(Wii);
   bindings.allocate(Whi);
   bindings.allocate(Bii);
   bindings.allocate(Bhi);
 
   // output gate
-//  Placeholder *Wio = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wio", true);
-//  Placeholder *Who = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", true);
-//  Placeholder *Bio = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bio", true);
-//  Placeholder *Bho = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bho", true);
-
   Placeholder *Wio = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wio", true);
+      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wio", true);
   Placeholder *Who = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", true);
   Placeholder *Bio = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bio", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bio", true);
   Placeholder *Bho = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bho", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bho", true);
+
+//  Placeholder *Wio = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wio", true);
+//  Placeholder *Who = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", true);
+//  Placeholder *Bio = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bio", true);
+//  Placeholder *Bho = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bho", true);
   bindings.allocate(Wio);
   bindings.allocate(Who);
   bindings.allocate(Bio);
   bindings.allocate(Bho);
 
   // cell state
-//  Placeholder *Wig = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wig", true);
-//  Placeholder *Whg = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", true);
-//  Placeholder *Big = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Big", true);
-//  Placeholder *Bhg = getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhg", true);
-
   Placeholder *Wig = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wig", true);
+      ElemKind::FloatTy, {inputSize,hiddenSize}, nameBase + ".Wig", true);
   Placeholder *Whg = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", true);
   Placeholder *Big = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Big", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Big", true);
   Placeholder *Bhg = getParent()->createPlaceholder(
-      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhg", true);
+      ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhg", true);
+
+//  Placeholder *Wig = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wig", true);
+//  Placeholder *Whg = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", true);
+//  Placeholder *Big = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Big", true);
+//  Placeholder *Bhg = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhg", true);
   bindings.allocate(Wig);
   bindings.allocate(Whg);
   bindings.allocate(Big);
@@ -2755,79 +2755,103 @@ void Function::createInferPytorchLSTM(PlaceholderBindings &bindings,
 
   std::vector<Node *> outputNodes;
   for (unsigned t = 0; t < timeSteps; t++) {
-	auto *InputTranspose = createTranspose("lstm.input.transpose", inputs[t],{1,0});
+	//auto *InputTranspose = createTranspose("lstm.input.transpose", inputs[t],{1,0});
     auto fc1Name = nameBase + ".fc1." + std::to_string(t);
     auto fc2Name = nameBase + ".fc2." + std::to_string(t);
     auto add1Name = nameBase + ".add1." + std::to_string(t);
     auto sigmoid1Name = nameBase + ".sigmoid1." + std::to_string(t);
 
-//    Node *Ft = createSigmoid(
-//        sigmoid1Name,
-//        createAdd(add1Name, createFullyConnected(fc1Name, Ht, Whf , Bhf),
-//                  createFullyConnected(fc2Name, inputs[t], Wif, Bif)));
-    Node *WifTranspose = createTranspose("temp.transpose" , NodeValue(Wif) , {1,0});
-    Node *BifReshape = createReshape("temp.reshape" , NodeValue(Bif), {hiddenSize});
-    Node *FCtest = createFullyConnected(fc2Name , inputs[t] , (Storage *)WifTranspose,
-    		(Storage *)BifReshape);
-    Node *FCtestTranspose = createTranspose("FC.Transpose", FCtest , {1,0});
+//  ****************** Ht Transpose ***************
+    auto *Ht_Transpose = createTranspose("Ht.transpose" , Ht , {1,0});
+//  ***********************************************
 
-    auto *MatMulFt = createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
-    auto *MatMulFtinput = createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
-    Node *Ft = createSigmoid(
+    // Forget gate:
+    //Node *WifTranspose = createTranspose("Wif.transpose" , NodeValue(Wif) , {1,0});
+    auto *FCFtInput = createFullyConnected(fc1Name , inputs[t] ,Wif, Bif);
+    auto *FCFtInputTranspose = createTranspose("FCFtInput.Transpose", FCFtInput , {1,0});
+
+    //Node *WhfTranspose = createTranspose("Whf.transpose" , NodeValue(Whf) , {1,0});
+    auto *FCFt = createFullyConnected(fc2Name , Ht_Transpose , Whf, Bhf);
+    auto *FCFtTranspose = createTranspose("FCFt.Transpose", FCFt , {1,0});
+
+    //auto *MatMulFt = createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
+    //auto *MatMulFtinput = createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
+    auto *Ft = createSigmoid(
         sigmoid1Name,
-        createAdd(add1Name, createAdd(fc1Name, FCtestTranspose, Bif),
-        		createAdd(fc2Name, MatMulFt, Bhf)));
+        createAdd(add1Name, FCFtInputTranspose, FCFtTranspose));
 
     auto fc3Name = nameBase + ".fc3." + std::to_string(t);
     auto fc4Name = nameBase + ".fc4." + std::to_string(t);
     auto add2Name = nameBase + ".add2." + std::to_string(t);
     auto sigmoid2Name = nameBase + ".sigmoid2." + std::to_string(t);
 
-//    Node *It = createSigmoid(
-//        sigmoid2Name,
-//        createAdd(add2Name, createFullyConnected(fc3Name, Ht, Whi, Bhi),
-//                  createFullyConnected(fc4Name, inputs[t], Wii, Bii)));
+    // input gate
+    //Node *WiiTranspose = createTranspose("Wii.transpose" , NodeValue(Wii) , {1,0});
+    auto *FCItInput = createFullyConnected(fc3Name , inputs[t] , Wii, Bii);
+    auto *FCItInputTranspose = createTranspose("FCItInput.Transpose", FCItInput , {1,0});
 
-    auto *MatMulIt = createMatMul(fc3Name, NodeValue(Whi),NodeValue(Ht));
-    auto *MatMulItinput = createMatMul(fc4Name, NodeValue(Wii),NodeValue(InputTranspose));
+    //Node *WhiTranspose = createTranspose("Whi.transpose" , NodeValue(Whi) , {1,0});
+    auto *FCIt = createFullyConnected(fc4Name , Ht_Transpose , Whi, Bhi);
+    auto *FCItTranspose = createTranspose("FCIt.Transpose", FCIt , {1,0});
     auto *It = createSigmoid(
         sigmoid2Name,
-        createAdd(add2Name, createAdd(fc3Name, MatMulItinput, Bii),
-        		createAdd(fc4Name, MatMulIt, Bhi)));
+        createAdd(add2Name, FCItInputTranspose , FCItTranspose));
+
+//    auto *MatMulIt = createMatMul(fc3Name, NodeValue(Whi),NodeValue(Ht));
+//    auto *MatMulItinput = createMatMul(fc4Name, NodeValue(Wii),NodeValue(InputTranspose));
+//    auto *It = createSigmoid(
+//        sigmoid2Name,
+//        createAdd(add2Name, createAdd(fc3Name, MatMulItinput, Bii),
+//        		createAdd(fc4Name, MatMulIt, Bhi)));
 
     auto fc5Name = nameBase + ".fc5." + std::to_string(t);
     auto fc6Name = nameBase + ".fc6." + std::to_string(t);
     auto add3Name = nameBase + ".add3." + std::to_string(t);
     auto sigmoid3Name = nameBase + ".sigmoid3." + std::to_string(t);
 
-//    Node *Ot = createSigmoid(
-//        sigmoid3Name,
-//        createAdd(add3Name, createFullyConnected(fc5Name, Ht, Who, Bho),
-//                  createFullyConnected(fc6Name, inputs[t], Wio, Bio)));
+    // output gate
+    //Node *WioTranspose = createTranspose("Wio.transpose" , NodeValue(Wio) , {1,0});
+    auto *FCOtInput = createFullyConnected(fc5Name , inputs[t] , Wio, Bio);
+    auto *FCOtInputTranspose = createTranspose("FCOtInput.Transpose", FCOtInput , {1,0});
 
-    auto *MatMulOt = createMatMul(fc5Name, NodeValue(Who),NodeValue(Ht));
-    auto *MatMulOtinput = createMatMul(fc6Name, NodeValue(Wio),NodeValue(InputTranspose));
+    //Node *WhoTranspose = createTranspose("Who.transpose" , NodeValue(Who) , {1,0});
+    auto *FCOt = createFullyConnected(fc6Name , Ht_Transpose , Who, Bho);
+    auto *FCOtTranspose = createTranspose("FCOt.Transpose", FCOt , {1,0});
     auto *Ot = createSigmoid(
-        sigmoid3Name,
-        createAdd(add3Name, createAdd(fc5Name, MatMulOtinput, Bio),
-                  createAdd(fc6Name, MatMulOt, Bho)));
+        sigmoid2Name,
+        createAdd(add3Name, FCOtInputTranspose , FCOtTranspose));
+
+
+//    auto *MatMulOt = createMatMul(fc5Name, NodeValue(Who),NodeValue(Ht));
+//    auto *MatMulOtinput = createMatMul(fc6Name, NodeValue(Wio),NodeValue(InputTranspose));
+//    auto *Ot = createSigmoid(
+//        sigmoid3Name,
+//        createAdd(add3Name, createAdd(fc5Name, MatMulOtinput, Bio),
+//                  createAdd(fc6Name, MatMulOt, Bho)));
 
     auto fc7Name = nameBase + ".fc7." + std::to_string(t);
     auto fc8Name = nameBase + ".fc8." + std::to_string(t);
     auto add4Name = nameBase + ".add4." + std::to_string(t);
     auto tanh1Name = nameBase + ".tanh1." + std::to_string(t);
 
-//    Node *Gt = createTanh(
-//    tanh1Name,
-//    createAdd(add4Name, createFullyConnected(fc7Name, Ht, Whg, Bhg),
-//    			createFullyConnected(fc8Name, inputs[t], Wig, Big)));
+    // cell gate
+    //Node *WigTranspose = createTranspose("Wig.transpose" , NodeValue(Wig) , {1,0});
+    auto *FCGtInput = createFullyConnected(fc7Name , inputs[t] , Wig, Big);
+    auto *FCGtInputTranspose = createTranspose("FCGtInput.Transpose", FCGtInput , {1,0});
 
-    auto *MatMulGt = createMatMul(fc7Name, NodeValue(Whg),NodeValue(Ht));
-    auto *MatMulGtinput = createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
+    //Node *WhgTranspose = createTranspose("Whg.transpose" , NodeValue(Whg) , {1,0});
+    auto *FCGt = createFullyConnected(fc8Name , Ht_Transpose , Whg, Bhg);
+    auto *FCGtTranspose = createTranspose("FCGt.Transpose", FCGt , {1,0});
+
+//    auto *MatMulGt = createMatMul(fc7Name, NodeValue(Whg),NodeValue(Ht));
+//    auto *MatMulGtinput = createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
+//    auto *Gt = createTanh(
+//        tanh1Name,
+//        createAdd(add4Name, createAdd(fc7Name, MatMulGtinput, Big),
+//                  createAdd(fc8Name, MatMulGt, Bhg)));
     auto *Gt = createTanh(
-        tanh1Name,
-        createAdd(add4Name, createAdd(fc7Name, MatMulGtinput, Big),
-                  createAdd(fc8Name, MatMulGt, Bhg)));
+            tanh1Name,
+            createAdd(add4Name, FCGtInputTranspose , FCGtTranspose ));
 
     auto mul1Name = nameBase + ".mul1." + std::to_string(t);
     auto mul2Name = nameBase + ".mul2." + std::to_string(t);

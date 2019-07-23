@@ -374,7 +374,7 @@ NodeValue Model::loadAttention(Node *AttentionQuery){
 	//debug_size_print(SoftmaxReshape);
 	auto *SoftmaxExpand = F_->createExpandDims("attention.softmax.expanddims",
 			SoftmaxReshape , {1});
-	debug_size_print(SoftmaxExpand);
+	//debug_size_print(SoftmaxExpand);
 	Node *Bmm = F_->createBatchMatMul("attention.bmm", SoftmaxExpand , encoderHiddenOutput_);
 	//debug_size_print(Bmm);
 	Node *bmmReshape = F_->createReshape("attention.bmm.reshape", Bmm ,
@@ -653,24 +653,24 @@ void Model::loadEncoderWieghts(){
 
 			}
 		}
-		//loadMatrixAndSplitAndTransposeFromFile(
-	   	loadMatrixAndSplitFromFile(
+		loadMatrixAndSplitAndTransposeFromFile(
+	   	//loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_hh_l0.bin" ,
 				ConstVecH , LSTM_LEVELS);
 	   	ConstVecH.clear();
-	   	//loadMatrixAndSplitAndTransposeFromFile(
-	   	loadMatrixAndSplitFromFile(
+	   	loadMatrixAndSplitAndTransposeFromFile(
+	   	//loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_ih_l0.bin" ,
 				ConstVecX , LSTM_LEVELS);
 	   	ConstVecX.clear();
 	   	if (j == 0){
-	   		//loadMatrixAndSplitAndTransposeFromFile(
-	   		loadMatrixAndSplitFromFile(
+	   		loadMatrixAndSplitAndTransposeFromFile(
+	   		//loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
 					ConstVecOppH , LSTM_LEVELS);
 		   	ConstVecOppH.clear();
-		   	//loadMatrixAndSplitAndTransposeFromFile(
-		   	loadMatrixAndSplitFromFile(
+		   	loadMatrixAndSplitAndTransposeFromFile(
+		   	//loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
 					ConstVecOppX , LSTM_LEVELS);
 		   	ConstVecOppX.clear();
@@ -746,25 +746,25 @@ void Model::loadDecoderWieghts(){
 				ConstVecX.push_back(ConstX);
 			}
 			if (j == 0){
-				//loadMatrixAndSplitAndTransposeFromFile(
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
-				//loadMatrixAndSplitAndTransposeFromFile(
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
 				ConstVecX.clear();
 			}
 			else{
-				//loadMatrixAndSplitAndTransposeFromFile(
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
-				//loadMatrixAndSplitAndTransposeFromFile(
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
 				ConstVecX.clear();

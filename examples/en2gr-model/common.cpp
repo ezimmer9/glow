@@ -115,8 +115,8 @@ void loadMatrixAndTransposeFromFile(llvm::StringRef filename, Tensor &result) {
 		std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
 		exit(1);
 	}
-	Tensor src(ElemKind::FloatTy, {result.dims()[0], result.dims()[1]});
-	Tensor dst(ElemKind::FloatTy, {result.dims()[1], result.dims()[0]});
+	Tensor src(ElemKind::FloatTy, {result.dims()[1], result.dims()[0]});
+	Tensor dst(ElemKind::FloatTy, {result.dims()[0], result.dims()[1]});
 	std::ifstream file(filename.str(), std::ios::binary);
 	assert(file.is_open() == true);
 	metadata meta;
@@ -129,7 +129,7 @@ void loadMatrixAndTransposeFromFile(llvm::StringRef filename, Tensor &result) {
 		exit(1);
 	}
 	src.transpose(&dst , {1,0});
-	std::memcpy(result.getUnsafePtr(), dst.getUnsafePtr(), result.size());
+	std::memcpy(result.getUnsafePtr(), dst.getUnsafePtr(), result.size()*sizeof(float));
 	file.close();
 }
 

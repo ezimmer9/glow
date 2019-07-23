@@ -418,8 +418,8 @@ void Model::loadDecoder(){
 
 
 	Placeholder *classifier_w = mod.createPlaceholder(ElemKind::FloatTy,
-			{tok_.index2word_.size()+4 ,EMBEDDING_SIZE}, "decoder.classifier_w", false);
-	loadMatrixFromFile("en2gr/decoder.classifier.classifier.weight.bin", *bindings.allocate(classifier_w));
+			{EMBEDDING_SIZE, tok_.index2word_.size()+4}, "decoder.classifier_w", false);
+	loadMatrixAndTransposeFromFile("en2gr/decoder.classifier.classifier.weight.bin", *bindings.allocate(classifier_w));
 
 	Placeholder *classifier_b = mod.createPlaceholder(ElemKind::FloatTy,
 				{tok_.index2word_.size()+4}, "decoder.classifier_w", false);
@@ -520,24 +520,13 @@ void Model::loadDecoder(){
 		// TODO: think how to avoid the last allocation for dec_seq
 
 		// classifier
-		auto *tmpDecoderOut = F_->createTranspose("tmp.decoder.out",
-				addResidual2[word_inx],{1,0});
-
-		auto *ClassifierMatMul = F_->createMatMul("decoder.classifier.matmul",
-				NodeValue(classifier_w) , NodeValue(tmpDecoderOut));
-		//debug_size_print(ClassifierMatMul);
-		auto *classifierBExpand = F_->createExpandDims("decoder.classifier.expand",
-				(Node *)classifier_b , {1});
-		//debug_size_print(classifierBExpand);
-		auto *ClassifierAdd = F_->createAdd("decoder.classifier.add",
-				ClassifierMatMul , classifierBExpand);
-		//debug_size_print(ClassifierW);
-		Node *ClassifierWT = F_->createTranspose("decoder.classifier.transpose" ,
-				ClassifierAdd , {1,0});
+		auto *ClasiffierFC = F_->createFullyConnected("decoder.classifier.fc",
+				addResidual2[word_inx] , classifier_w , classifier_b);
+				//debug_size_print(ClasiffierFC);
 		addResidual2.clear();
 
 		// softmax
-		Node *DecSM = F_->createSoftMax("decoder.softmax", ClassifierWT, S);
+		Node *DecSM = F_->createSoftMax("decoder.softmax", ClasiffierFC, S);
 		//debug_size_print(DecSM);
 		// topk
 		auto *topK = F_->createTopK("decoder.topK", DecSM, 1);
@@ -602,7 +591,7 @@ void Model::translate(const std::vector<std::string> &batch){
 	for (unsigned j = 0; j < batch.size(); j++) {
 		for (unsigned i = 0; i < MAX_LENGTH; i++) {
 			int64_t wordIdx = (int64_t)OH.at({i, j});
-			if (wordIdx == tok_.word2index_["EOS"])
+			if (wordIdx == 3)
 				break;
 
 			if (i)

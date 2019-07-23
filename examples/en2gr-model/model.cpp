@@ -128,7 +128,7 @@ void Model::loadEncoder(){
 	F_->createInferPytorchLSTM(bindings, "encoder.lstm0", enc_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, hidenOutputs0);
 
-	F_->createInferPytorchLSTM(bindings, "encoder.opp.lstm", opposite_seq ,
+	F_->createInferPytorchBiLSTM(bindings, "encoder.opp.lstm", opposite_seq ,
 			batchSize_, EMBEDDING_SIZE , HIDDEN_SIZE, oppHidenOutputs0);
 
 	std::vector<NodeValue> lstm0Concat;
@@ -644,19 +644,23 @@ void Model::loadEncoderWieghts(){
 
 			}
 		}
-	   	loadMatrixAndSplitFromFile(
+		loadMatrixAndSplitAndTransposeFromFile(
+	   	//loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_hh_l0.bin" ,
 				ConstVecH , LSTM_LEVELS);
 	   	ConstVecH.clear();
-	   	loadMatrixAndSplitFromFile(
+		loadMatrixAndSplitAndTransposeFromFile(
+	   	//loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_ih_l0.bin" ,
 				ConstVecX , LSTM_LEVELS);
 	   	ConstVecX.clear();
 	   	if (j == 0){
+			//loadMatrixAndSplitAndTransposeFromFile(
 	   		loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
 					ConstVecOppH , LSTM_LEVELS);
 		   	ConstVecOppH.clear();
+			//loadMatrixAndSplitAndTransposeFromFile(
 		   	loadMatrixAndSplitFromFile(
 		   			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
 					ConstVecOppX , LSTM_LEVELS);
@@ -733,21 +737,25 @@ void Model::loadDecoderWieghts(){
 				ConstVecX.push_back(ConstX);
 			}
 			if (j == 0){
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.att_rnn.rnn.weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
 				ConstVecX.clear();
 			}
 			else{
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_hh_l0.bin" ,
 						ConstVecH , LSTM_LEVELS);
 				ConstVecH.clear();
-				loadMatrixAndSplitFromFile(
+				loadMatrixAndSplitAndTransposeFromFile(
+				//loadMatrixAndSplitFromFile(
 						"en2gr/decoder.rnn_layers."+ std::to_string(j-1) +".weight_ih_l0.bin" ,
 						ConstVecX , LSTM_LEVELS);
 				ConstVecX.clear();

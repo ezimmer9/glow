@@ -180,3 +180,42 @@ void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *
 //  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr() + 4);
 //  std::cout << " ****** End loadMatrixAndSplitFromFile ******\n" ;
 }
+
+void loadMatrixAndSplitAndTransposeFromFile(llvm::StringRef filename, std::vector<Constant *> result, uint numOfSlices) {
+	std::ifstream file(filename.str(), std::ios::binary);
+	assert(file.is_open() == true);
+	metadata meta;
+	meta.read_from_file(file);
+	size_t file_size = 1;
+	for (auto size : meta.m_size){
+		file_size = file_size * size;
+	}
+	for (uint i = 0 ; i < numOfSlices ; i++){
+		if (result[i]->dims().size() != 2){
+			std::cout << "[Error] the load from file and trnspose only with 2 dimension\n";
+			exit(1);
+		}
+		if (result[i]->dims().size() == 2){
+			Tensor src(ElemKind::FloatTy, {result[i]->dims()[1],result[i]->dims()[0]});
+			Tensor dst(ElemKind::FloatTy, {(result[i]->dims()[0]),result[i]->dims()[1]});
+			if (!file.read(src.getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
+				std::cout << "Error: only " << file.gcount() << " could be read\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
+				exit(1);
+			}
+			src.transpose(&dst , {1,0});
+//			for (int i = 1; i < 5 ; i++){
+//				for (int j = 1; j < 5 ; j++){
+//					std::cout << src.getHandle<float_t>().at({i,j}) <<  " "
+//							<< dst.getHandle<float_t>().at({j,i}) << "\n";
+//				}
+//			}
+			std::memcpy(result[i]->getPayload().getUnsafePtr(),
+					dst.getUnsafePtr(), (file_size/numOfSlices)*sizeof(float));
+		}
+	}
+	file.close();
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr());
+//  std::cout << *(float *)(result[0]->getPayload().getUnsafePtr() + 4);
+//  std::cout << " ****** End loadMatrixAndSplitFromFile ******\n" ;
+}

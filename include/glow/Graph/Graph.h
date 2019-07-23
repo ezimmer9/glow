@@ -1106,6 +1106,11 @@ public:
                   unsigned hiddenSize, unsigned outputSize,
                   std::vector<NodeValue> &outputs);
 
+  void createInferPytorchBiLSTM(PlaceholderBindings &bindings, llvm::StringRef namePrefix,
+                  const llvm::ArrayRef<NodeValue> inputs, unsigned batchSize,
+                  unsigned hiddenSize, unsigned outputSize,
+                  std::vector<NodeValue> &outputs);
+
   /// Create a TraceEvent in the runtime profile, which triggers collection of
   /// runtime statistics.
   TraceEventNode *createTraceEvent(llvm::StringRef eventName,

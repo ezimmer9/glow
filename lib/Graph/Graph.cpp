@@ -2630,11 +2630,18 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
   assert(inputSize > 0 && "input dimensionality is zero");
 
   // Initialize the hidden and cell states to zero.
+//  Placeholder *HInit =
+//      getParent()->createPlaceholder(ElemKind::FloatTy, {batchSize,hiddenSize},
+//                                     "initial_hidden_state", false);
+
   Placeholder *HInit =
       getParent()->createPlaceholder(ElemKind::FloatTy, {hiddenSize,batchSize},
                                      "initial_hidden_state", false);
   bindings.allocate(HInit)->zero();
   Node *Ht = HInit;
+
+//  Placeholder *CInit = getParent()->createPlaceholder(
+//      ElemKind::FloatTy, {batchSize,hiddenSize}, "initial_cell_state", false);
 
   Placeholder *CInit = getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize,batchSize}, "initial_cell_state", false);
@@ -2712,8 +2719,9 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
 
   std::vector<Node *> outputNodes;
   for (unsigned t = 0; t < timeSteps; t++) {
-
 	auto *InputTranspose = createTranspose("lstm.input.transpose", inputs[t],{1,0});
+
+	// forget gate
     auto fc1Name = nameBase + ".fc1." + std::to_string(t);
     auto fc2Name = nameBase + ".fc2." + std::to_string(t);
     auto add1Name = nameBase + ".add1." + std::to_string(t);
@@ -2722,10 +2730,11 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
     auto *MatMulFt = createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
     auto *MatMulFtinput = createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
     auto *Ft = createSigmoid(
-        sigmoid1Name,
-        createAdd(add1Name, createAdd(fc1Name, MatMulFtinput, Bif),
-        		createAdd(fc2Name, MatMulFt, Bhf)));
+    		sigmoid1Name,
+			createAdd(add1Name, createAdd(fc1Name, MatMulFtinput, Bif),
+			createAdd(fc2Name, MatMulFt, Bhf)));
 
+    // input gate
     auto fc3Name = nameBase + ".fc3." + std::to_string(t);
     auto fc4Name = nameBase + ".fc4." + std::to_string(t);
     auto add2Name = nameBase + ".add2." + std::to_string(t);
@@ -2738,6 +2747,7 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
         createAdd(add2Name, createAdd(fc3Name, MatMulItinput, Bii),
         		createAdd(fc4Name, MatMulIt, Bhi)));
 
+    // output gate
     auto fc5Name = nameBase + ".fc5." + std::to_string(t);
     auto fc6Name = nameBase + ".fc6." + std::to_string(t);
     auto add3Name = nameBase + ".add3." + std::to_string(t);
@@ -2750,10 +2760,12 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
         createAdd(add3Name, createAdd(fc5Name, MatMulOtinput, Bio),
                   createAdd(fc6Name, MatMulOt, Bho)));
 
+    // cell gate
     auto fc7Name = nameBase + ".fc7." + std::to_string(t);
     auto fc8Name = nameBase + ".fc8." + std::to_string(t);
     auto add4Name = nameBase + ".add4." + std::to_string(t);
     auto tanh1Name = nameBase + ".tanh1." + std::to_string(t);
+
 
     auto *MatMulGt = createMatMul(fc7Name, NodeValue(Whg),NodeValue(Ht));
     auto *MatMulGtinput = createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
@@ -2761,6 +2773,7 @@ void Function::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
         tanh1Name,
         createAdd(add4Name, createAdd(fc7Name, MatMulGtinput, Big),
                   createAdd(fc8Name, MatMulGt, Bhg)));
+
 
     auto mul1Name = nameBase + ".mul1." + std::to_string(t);
     auto mul2Name = nameBase + ".mul2." + std::to_string(t);

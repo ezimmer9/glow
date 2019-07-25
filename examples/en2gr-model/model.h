@@ -76,14 +76,14 @@ struct Vocabulary {
 
 struct Model {
   unsigned batchSize_;
+  ExecutionContext context;
   ExecutionEngine EE_{ExecutionBackend};
   Function *F_;
   Vocabulary en_, gr_, tok_;
   Placeholder *input_;
   Placeholder *output_;
-  PlaceholderBindings bindings;
   LoweredInfoMap loweredMap_;
-  std::vector<std::pair<ElemKind ,Placeholder *>> map_debug;
+  std::unique_ptr<TraceContext> traceContext;
 
   void loadLanguages();
   void loadTokens();

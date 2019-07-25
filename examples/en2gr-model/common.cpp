@@ -21,6 +21,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+const size_t NUM_TRACE = 2;
 using namespace glow;
 
 struct metadata{
@@ -94,9 +95,7 @@ void loadMatrixFromFile(llvm::StringRef filename, Tensor &result) {
   meta.read_from_file(file);
   if (!file.read(result.getUnsafePtr(), result.size() * sizeof(float))) {
 	  std::cout << "Error: only " << file.gcount() << " could be read\n";
-	  std::cout << "Error reading file: " << filename.str() << '\n'
-			  << "Need to be downloaded by calling:\n"
-              << "python ../glow/utils/download_test_db.py -d fr2en\n";
+	  std::cout << "Error reading file: " << filename.str() << '\n';
     exit(1);
   }
   file.close();
@@ -123,9 +122,7 @@ void loadMatrixAndTransposeFromFile(llvm::StringRef filename, Tensor &result) {
 	meta.read_from_file(file);
 	if (!file.read(src.getUnsafePtr(), result.size() * sizeof(float))) {
 		std::cout << "Error: only " << file.gcount() << " could be read\n";
-		std::cout << "Error reading file: " << filename.str() << '\n'
-				<< "Need to be downloaded by calling:\n"
-				<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+		std::cout << "Error reading file: " << filename.str() << '\n';
 		exit(1);
 	}
 	src.transpose(&dst , {1,0});
@@ -147,9 +144,7 @@ void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *
 		if (result[i]->dims().size() == 2){
 			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
 				std::cout << "Error: only " << file.gcount() << " could be read\n";
-				std::cout << "Error reading file: " << filename.str() << '\n'
-					<< "Need to be downloaded by calling:\n"
-					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
 				exit(1);
 			}
 			if (false){
@@ -165,12 +160,9 @@ void loadMatrixAndSplitFromFile(llvm::StringRef filename, std::vector<Constant *
 			}
 		}
 		else if (result[i]->dims().size() == 1){
-		std::cout << result[i]->getDebugDesc();
 			if (!file.read(result[i]->getPayload().getUnsafePtr(), (file_size/numOfSlices) * sizeof(float))) {
 				std::cout << "Error: only " << file.gcount() << " could be read\n";
-				std::cout << "Error reading file: " << filename.str() << '\n'
-					<< "Need to be downloaded by calling:\n"
-					<< "python ../glow/utils/download_test_db.py -d fr2en\n";
+				std::cout << "Error reading file: " << filename.str() << '\n';
 				exit(1);
 			}
 		}

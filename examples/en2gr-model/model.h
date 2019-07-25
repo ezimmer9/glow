@@ -110,6 +110,16 @@ private:
   void loadEncoderBiases();
   void loadDecoderWieghts();
   void loadDecoderBiases();
+
+  void createInferPytorchLSTM(PlaceholderBindings &bindings, llvm::StringRef namePrefix,
+                  const llvm::ArrayRef<NodeValue> inputs, unsigned batchSize,
+                  unsigned hiddenSize, unsigned outputSize,
+                  std::vector<NodeValue> &outputs);
+
+  void createInferPytorchBiLSTM(PlaceholderBindings &bindings, llvm::StringRef namePrefix,
+                  const llvm::ArrayRef<NodeValue> inputs, unsigned batchSize,
+                  unsigned hiddenSize, unsigned outputSize,
+                  std::vector<NodeValue> &outputs);
 };
 
 #ifdef __cplusplus

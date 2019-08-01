@@ -1242,14 +1242,10 @@ void Model::compile() {
       precConfig.quantConfig.assertAllNodesQuantized = true;
     }
 
-    // Do not create constants if we're profiling; the newly allocate histogram
-    // vars will erroneously become constants.
-    if (dumpProfileFileOpt.empty()) {
-    	std::vector<Placeholder *> debugVec;
-    	debugVec.push_back(input_);
-    	debugVec.push_back(output_);
-    	::glow::convertPlaceholdersToConstants(F_, *context.getPlaceholderBindings(), debugVec);
-    }
+    std::vector<Placeholder *> placeHolderVec;
+    placeHolderVec.push_back(input_);
+    placeHolderVec.push_back(output_);
+    ::glow::convertPlaceholdersToConstants(F_, *context.getPlaceholderBindings(), placeHolderVec);
 //    ConstList consts = F_->findConstants();
 //    	for (auto con : consts){
 //    		std::cout << "constant: " << con->getName().str ()<< "\n";

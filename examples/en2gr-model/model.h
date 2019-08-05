@@ -108,6 +108,7 @@ private:
   Placeholder *loadEmbedding(llvm::StringRef langPrefix, size_t langSize);
   void loadEncoderWieghts();
   void loadEncoderBiases();
+  void loadEncoderReverse();
   void loadDecoderWieghts();
   void loadDecoderBiases();
 

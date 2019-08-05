@@ -178,10 +178,10 @@ void Model::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
 
     auto *MatMulFt = F_->createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
     auto *MatMulFtinput = F_->createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
+    auto *MatMulAdd1 = F_->createAdd(add1Name+fc1Name, MatMulFtinput, Bif);
+    auto *MatMulAdd2 = F_->createAdd(add1Name+fc2Name, MatMulFt, Bhf);
     auto *Ft = F_->createSigmoid(
-    		sigmoid1Name,
-			F_->createAdd(add1Name, F_->createAdd(fc1Name, MatMulFtinput, Bif),
-					F_->createAdd(fc2Name, MatMulFt, Bhf)));
+    		sigmoid1Name, F_->createAdd(add1Name, MatMulAdd1,MatMulAdd2));
 
     // input gate
     auto fc3Name = nameBase + ".fc3." + std::to_string(t);
@@ -193,8 +193,8 @@ void Model::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
     auto *MatMulItinput = F_->createMatMul(fc4Name, NodeValue(Wii),NodeValue(InputTranspose));
     auto *It = F_->createSigmoid(
         sigmoid2Name,
-		F_->createAdd(add2Name, F_->createAdd(fc3Name, MatMulItinput, Bii),
-				F_->createAdd(fc4Name, MatMulIt, Bhi)));
+		F_->createAdd(add2Name, F_->createAdd(add2Name+fc3Name, MatMulItinput, Bii),
+				F_->createAdd(add2Name+fc4Name, MatMulIt, Bhi)));
 
     // output gate
     auto fc5Name = nameBase + ".fc5." + std::to_string(t);
@@ -206,8 +206,8 @@ void Model::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
     auto *MatMulOtinput = F_->createMatMul(fc6Name, NodeValue(Wio),NodeValue(InputTranspose));
     auto *Ot = F_->createSigmoid(
         sigmoid3Name,
-		F_->createAdd(add3Name, F_->createAdd(fc5Name, MatMulOtinput, Bio),
-				F_->createAdd(fc6Name, MatMulOt, Bho)));
+		F_->createAdd(add3Name, F_->createAdd(add3Name+fc5Name, MatMulOtinput, Bio),
+				F_->createAdd(add3Name+fc6Name, MatMulOt, Bho)));
 
     // cell gate
     auto fc7Name = nameBase + ".fc7." + std::to_string(t);
@@ -220,8 +220,8 @@ void Model::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
     auto *MatMulGtinput = F_->createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
     auto *Gt = F_->createTanh(
         tanh1Name,
-		F_->createAdd(add4Name, F_->createAdd(fc7Name, MatMulGtinput, Big),
-				F_->createAdd(fc8Name, MatMulGt, Bhg)));
+		F_->createAdd(add4Name, F_->createAdd(add4Name+fc7Name, MatMulGtinput, Big),
+				F_->createAdd(add4Name+fc8Name, MatMulGt, Bhg)));
 
 
     auto mul1Name = nameBase + ".mul1." + std::to_string(t);
@@ -252,16 +252,11 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
   Placeholder *HInit =
       F_->getParent()->createPlaceholder(ElemKind::FloatTy, {hiddenSize,batchSize},
                                      "initial_hidden_state", false);
-//  Placeholder *HInit =
-//      F_->getParent()->createPlaceholder(ElemKind::FloatTy, {batchSize,hiddenSize},
-//                                     "initial_hidden_state", false);
   bindings.allocate(HInit)->zero();
   Node *Ht = HInit;
 
   Placeholder *CInit = F_->getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize, batchSize}, "initial_cell_state", false);
-//  Placeholder *CInit = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {batchSize, hiddenSize}, "initial_cell_state", false);
   bindings.allocate(CInit)->zero();
   Node *Ct = CInit;
 
@@ -287,15 +282,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bif", false);
   Placeholder *Bhf = F_->getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhf", false);
-
-//  Placeholder *Wif = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wif", false);
-//  Placeholder *Whf = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whf", false);
-//  Placeholder *Bif = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bif", false);
-//  Placeholder *Bhf = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,1}, nameBase + ".Bhf", false);
   bindings.allocate(Wif);
   bindings.allocate(Whf);
   bindings.allocate(Bif);
@@ -310,15 +296,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bii", false);
   Placeholder *Bhi = F_->getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhi", false);
-
-//  Placeholder *Wii = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wii", false);
-//  Placeholder *Whi = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whi", false);
-//  Placeholder *Bii = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize ,1}, nameBase + ".Bii", false);
-//  Placeholder *Bhi = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bhi", false);
   bindings.allocate(Wii);
   bindings.allocate(Whi);
   bindings.allocate(Bii);
@@ -333,15 +310,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bio", false);
   Placeholder *Bho = F_->getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bho", false);
-
-//  Placeholder *Wio = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wio", false);
-//  Placeholder *Who = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Who", false);
-//  Placeholder *Bio = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bio", false);
-//  Placeholder *Bho = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bho", false);
   bindings.allocate(Wio);
   bindings.allocate(Who);
   bindings.allocate(Bio);
@@ -356,15 +324,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Big", false);
   Placeholder *Bhg = F_->getParent()->createPlaceholder(
       ElemKind::FloatTy, {hiddenSize}, nameBase + ".Bhg", false);
-
-//  Placeholder *Wig = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize,inputSize}, nameBase + ".Wig", false);
-//  Placeholder *Whg = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, hiddenSize}, nameBase + ".Whg", false);
-//  Placeholder *Big = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Big", false);
-//  Placeholder *Bhg = F_->getParent()->createPlaceholder(
-//      ElemKind::FloatTy, {hiddenSize, 1}, nameBase + ".Bhg", false);
   bindings.allocate(Wig);
   bindings.allocate(Whg);
   bindings.allocate(Big);
@@ -376,7 +335,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
   std::vector<Node *> outputNodes;
   for (unsigned t = 0; t < timeSteps; t++) {
 
-	//auto *InputTranspose = createTranspose("lstm.input.transpose", inputs[t],{1,0});
     auto fc1Name = nameBase + ".fc1." + std::to_string(t);
     auto fc2Name = nameBase + ".fc2." + std::to_string(t);
     auto add1Name = nameBase + ".add1." + std::to_string(t);
@@ -391,12 +349,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto *Ft = F_->createSigmoid(
         sigmoid1Name,
 		F_->createAdd(add1Name, FCFtInputTranspose,FCFtTranspose));
-//    auto *MatMulFt = createMatMul(fc1Name, NodeValue(Whf),NodeValue(Ht));
-//    auto *MatMulFtinput = createMatMul(fc2Name, NodeValue(Wif),NodeValue(InputTranspose));
-//    auto *Ft = createSigmoid(
-//        sigmoid1Name,
-//        createAdd(add1Name, createAdd(fc1Name, MatMulFtinput, Bif),
-//        		createAdd(fc2Name, MatMulFt, Bhf)));
 
     auto fc3Name = nameBase + ".fc3." + std::to_string(t);
     auto fc4Name = nameBase + ".fc4." + std::to_string(t);
@@ -412,12 +364,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto *It = F_->createSigmoid(
         sigmoid2Name,
 		F_->createAdd(add2Name, FCItInputTranspose, FCItTranspose));
-//    auto *MatMulIt = createMatMul(fc3Name, NodeValue(Whi),NodeValue(Ht));
-//    auto *MatMulItinput = createMatMul(fc4Name, NodeValue(Wii),NodeValue(InputTranspose));
-//    auto *It = createSigmoid(
-//        sigmoid2Name,
-//        createAdd(add2Name, createAdd(fc3Name, MatMulItinput, Bii),
-//        		createAdd(fc4Name, MatMulIt, Bhi)));
 
     auto fc5Name = nameBase + ".fc5." + std::to_string(t);
     auto fc6Name = nameBase + ".fc6." + std::to_string(t);
@@ -433,12 +379,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto *Ot = F_->createSigmoid(
         sigmoid3Name,
 		F_->createAdd(add3Name, FCOtInputTranspose,FCOtTranspose));
-//    auto *MatMulOt = createMatMul(fc5Name, NodeValue(Who),NodeValue(Ht));
-//    auto *MatMulOtinput = createMatMul(fc6Name, NodeValue(Wio),NodeValue(InputTranspose));
-//    auto *Ot = createSigmoid(
-//        sigmoid3Name,
-//        createAdd(add3Name, createAdd(fc5Name, MatMulOtinput, Bio),
-//                  createAdd(fc6Name, MatMulOt, Bho)));
 
     auto fc7Name = nameBase + ".fc7." + std::to_string(t);
     auto fc8Name = nameBase + ".fc8." + std::to_string(t);
@@ -454,12 +394,6 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto *Gt = F_->createTanh(
     tanh1Name,
 	F_->createAdd(add4Name, FCGtInputTranspose,FCGtTranspose));
-//    auto *MatMulGt = createMatMul(fc7Name, NodeValue(Whg),NodeValue(Ht));
-//    auto *MatMulGtinput = createMatMul(fc8Name, NodeValue(Wig),NodeValue(InputTranspose));
-//    auto *Gt = createTanh(
-//        tanh1Name,
-//        createAdd(add4Name, createAdd(fc7Name, MatMulGtinput, Big),
-//                  createAdd(fc8Name, MatMulGt, Bhg)));
 
     auto mul1Name = nameBase + ".mul1." + std::to_string(t);
     auto mul2Name = nameBase + ".mul2." + std::to_string(t);
@@ -469,7 +403,7 @@ void Model::createInferPytorchLSTM(PlaceholderBindings &bindings,
     auto htName = nameBase + ".H." + std::to_string(t);
     auto tanh2Name = nameBase + ".tanh2." + std::to_string(t);
     Ht = F_->createMul(htName, Ot, F_->createTanh(tanh2Name, Ct));
-    Ht_Transpose = F_->createTranspose("lstm.out.transpose", Ht , {1,0});
+    Ht_Transpose = F_->createTranspose(nameBase +"lstm.out.transpose", Ht , {1,0});
     outputs.push_back(Ht_Transpose);
   }
 };
@@ -1045,15 +979,6 @@ void Model::loadEncoderWieghts(){
 			Constant *ConstX = mod->getConstantByName(const_name_x);
 			ConstVecH.push_back(ConstH);
 			ConstVecX.push_back(ConstX);
-			if (j == 0 ){
-				std::string const_name_opp_h = "encoder_opp_lstm_Wh" + files_indices[i] +"1";
-				std::string const_name_opp_x = "encoder_opp_lstm_Wi" + files_indices[i] +"1";
-				Constant *ConstOppH = mod->getConstantByName(const_name_opp_h);
-				Constant *ConstOppX = mod->getConstantByName(const_name_opp_x);
-				ConstVecOppH.push_back(ConstOppH);
-				ConstVecOppX.push_back(ConstOppX);
-
-			}
 		}
 		loadMatrixAndSplitAndTransposeFromFile(
 	   	//loadMatrixAndSplitFromFile(
@@ -1066,18 +991,6 @@ void Model::loadEncoderWieghts(){
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".weight_ih_l0.bin" ,
 				ConstVecX , LSTM_LEVELS);
 	   	ConstVecX.clear();
-	   	if (j == 0){
-			//loadMatrixAndSplitAndTransposeFromFile(
-	   		loadMatrixAndSplitFromFile(
-		   			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
-					ConstVecOppH , LSTM_LEVELS);
-		   	ConstVecOppH.clear();
-			//loadMatrixAndSplitAndTransposeFromFile(
-		   	loadMatrixAndSplitFromFile(
-		   			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
-					ConstVecOppX , LSTM_LEVELS);
-		   	ConstVecOppX.clear();
-	   	}
     }
 
 }
@@ -1090,21 +1003,12 @@ void Model::loadEncoderBiases(){
     {
 		for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
 		{
-			std::string const_name_h_b = "encoder_lstm"+ std::to_string(j) +"_Bi" + files_indices[i]+"1";
-			std::string const_name_x_b = "encoder_lstm"+ std::to_string(j) +"_Bh" + files_indices[i]+"1";
+			std::string const_name_h_b = "encoder_lstm"+ std::to_string(j) +"_Bh" + files_indices[i]+"1";
+			std::string const_name_x_b = "encoder_lstm"+ std::to_string(j) +"_Bi" + files_indices[i]+"1";
 			Constant *ConstHb = mod->getConstantByName(const_name_h_b);
 			Constant *ConstXb = mod->getConstantByName(const_name_x_b);
 			ConstVecHb.push_back(ConstHb);
 			ConstVecXb.push_back(ConstXb);
-			if (j == 0 ){
-				std::string const_name_opp_h_b = "encoder_opp_lstm_Bh" + files_indices[i] +"1";
-				std::string const_name_opp_x_b = "encoder_opp_lstm_Bi" + files_indices[i] +"1";
-				Constant *ConstOppHb = mod->getConstantByName(const_name_opp_h_b);
-				Constant *ConstOppXb = mod->getConstantByName(const_name_opp_x_b);
-				ConstVecOppHb.push_back(ConstOppHb);
-				ConstVecOppXb.push_back(ConstOppXb);
-
-			}
 		}
 	   	loadMatrixAndSplitFromFile(
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".bias_hh_l0.bin" ,
@@ -1114,17 +1018,50 @@ void Model::loadEncoderBiases(){
 	   			"en2gr/encoder.rnn_layers."+ std::to_string(j) +".bias_ih_l0.bin" ,
 				ConstVecXb , LSTM_LEVELS);
 	   	ConstVecXb.clear();
-	   	if (j == 0){
-	   		loadMatrixAndSplitFromFile(
-		   			"en2gr/encoder.rnn_layers.0.bias_hh_l0_reverse.bin" ,
-					ConstVecOppHb , LSTM_LEVELS);
-		   	ConstVecOppHb.clear();
-		   	loadMatrixAndSplitFromFile(
-		   			"en2gr/encoder.rnn_layers.0.bias_ih_l0_reverse.bin" ,
-					ConstVecOppXb , LSTM_LEVELS);
-		   	ConstVecOppXb.clear();
-	   	}
     }
+
+}
+
+void Model::loadEncoderReverse(){
+	auto mod = F_->getParent();
+	std::vector<Constant *> ConstVecOppH, ConstVecOppX;
+	std::vector<Constant *> ConstVecOppHb, ConstVecOppXb;
+	for (uint i =0 ; i < LSTM_LEVELS ; i++){
+		std::string const_name_opp_h = "encoder_opp_lstm_Wh" + files_indices[i] +"1";
+		std::string const_name_opp_x = "encoder_opp_lstm_Wi" + files_indices[i] +"1";
+		Constant *ConstOppH = mod->getConstantByName(const_name_opp_h);
+		Constant *ConstOppX = mod->getConstantByName(const_name_opp_x);
+		ConstVecOppH.push_back(ConstOppH);
+		ConstVecOppX.push_back(ConstOppX);
+	}
+	//loadMatrixAndSplitAndTransposeFromFile(
+	loadMatrixAndSplitFromFile(
+			"en2gr/encoder.rnn_layers.0.weight_hh_l0_reverse.bin" ,
+			ConstVecOppH , LSTM_LEVELS);
+	ConstVecOppH.clear();
+	//loadMatrixAndSplitAndTransposeFromFile(
+	loadMatrixAndSplitFromFile(
+			"en2gr/encoder.rnn_layers.0.weight_ih_l0_reverse.bin" ,
+			ConstVecOppX , LSTM_LEVELS);
+	ConstVecOppX.clear();
+
+	for (uint i =0 ; i < LSTM_LEVELS ; i++){
+		std::string const_name_opp_h_b = "encoder_opp_lstm_Bh" + files_indices[i] +"1";
+		std::string const_name_opp_x_b = "encoder_opp_lstm_Bi" + files_indices[i] +"1";
+		Constant *ConstOppHb = mod->getConstantByName(const_name_opp_h_b);
+		Constant *ConstOppXb = mod->getConstantByName(const_name_opp_x_b);
+		ConstVecOppHb.push_back(ConstOppHb);
+		ConstVecOppXb.push_back(ConstOppXb);
+
+	}
+   	loadMatrixAndSplitFromFile(
+   			"en2gr/encoder.rnn_layers.0.bias_hh_l0_reverse.bin" ,
+			ConstVecOppHb , LSTM_LEVELS);
+   	ConstVecOppHb.clear();
+   	loadMatrixAndSplitFromFile(
+   			"en2gr/encoder.rnn_layers.0.bias_ih_l0_reverse.bin" ,
+			ConstVecOppXb , LSTM_LEVELS);
+	ConstVecOppXb.clear();
 
 }
 
@@ -1252,6 +1189,7 @@ void Model::compile() {
 //   	}
     loadEncoderWieghts();
     loadEncoderBiases();
+    loadEncoderReverse();
     loadDecoderWieghts();
     loadDecoderBiases();
     context.setTraceContext(llvm::make_unique<TraceContext>(TraceLevel::STANDARD));

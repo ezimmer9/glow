@@ -2795,7 +2795,7 @@ void glow::optimize(Function *F, CompilationContext &cctx) {
   DCE().run(F);
 
   // Merge multiple matmul nodes into a single large matmul.
-  MergeMatMul().run(F);
+  //MergeMatMul().run(F);
 
   // Merge multiple batched adds into a larger batched add.
   MergeBatchedAdd().run(F);

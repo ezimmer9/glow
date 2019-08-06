@@ -65,6 +65,12 @@ llvm::cl::opt<bool> debugMode(
 		llvm::cl::init(false),
 		llvm::cl::cat(en2grCat));
 
+llvm::cl::opt<bool> trace(
+		"trace",
+		llvm::cl::desc("tracing and output"),
+		llvm::cl::init(false),
+		llvm::cl::cat(en2grCat));
+
 // namespace
 
 void Model::createInferPytorchBiLSTM(PlaceholderBindings &bindings,
@@ -943,7 +949,7 @@ void Model::translate(const std::vector<std::string> &batch){
 		std::cout << "\n\n";
 	}
 
-	if (debugMode){
+	if (trace){
 		std::vector<TraceEvent>& events = context.getTraceContext()->getTraceEvents();
 		TraceEvent::dumpTraceEvents(events, "glow-trace.json", "glow");
 	}
@@ -1161,24 +1167,6 @@ void Model::loadDecoderBiases(){
 void Model::compile() {
 	std::printf("*** compile ***\n\n");
 
-
-    CompilationContext cctx{&*context.getPlaceholderBindings(), &loweredMap_};
-    if (debugMode){
-    	cctx.backendOpts.autoInstrument = true;
-    }
-    PrecisionConfiguration &precConfig = cctx.precisionConfig;
-
-    if (!dumpProfileFileOpt.empty()) {
-      precConfig.quantMode = QuantizationMode::Profile;
-    }
-
-    // Load the quantization profile and transform the graph.
-    if (!loadProfileFileOpt.empty()) {
-      precConfig.quantMode = QuantizationMode::Quantize;
-      precConfig.quantConfig.infos = deserializeFromYaml(loadProfileFileOpt);
-      precConfig.quantConfig.assertAllNodesQuantized = true;
-    }
-
     std::vector<Placeholder *> placeHolderVec;
     placeHolderVec.push_back(input_);
     placeHolderVec.push_back(output_);
@@ -1192,6 +1180,29 @@ void Model::compile() {
     loadEncoderReverse();
     loadDecoderWieghts();
     loadDecoderBiases();
+
+    CompilationContext cctx{&*context.getPlaceholderBindings(), &loweredMap_};
+    if (trace){
+    	cctx.backendOpts.autoInstrument = true;
+    }
+    PrecisionConfiguration &precConfig = cctx.precisionConfig;
+
+    if (!dumpProfileFileOpt.empty()) {
+      precConfig.quantMode = QuantizationMode::Profile;
+    }
+
+    // Load the quantization profile and transform the graph.
+    if (!loadProfileFileOpt.empty()) {
+      precConfig.quantMode = QuantizationMode::Quantize;
+      precConfig.quantConfig.infos = deserializeFromYaml(loadProfileFileOpt);
+      precConfig.quantConfig.assertAllNodesQuantized = true;
+      if (ExecutionBackend == "CPU"){
+    	  precConfig.precisionModeKindSet.insert(Kinded::Kind::SoftMaxNodeKind);
+    	  precConfig.precisionModeKindSet.insert(Kinded::Kind::PowNodeKind);
+      }
+    }
+
+
     context.setTraceContext(llvm::make_unique<TraceContext>(TraceLevel::STANDARD));
     EE_.compile(F_, cctx);
 //    FunctionList debug = EE_.getModule().getFunctions();

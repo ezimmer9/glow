@@ -51,6 +51,7 @@ extern llvm::cl::OptionCategory quantizationCat;
 extern llvm::cl::OptionCategory en2grCat;
 extern llvm::cl::opt<std::string> dumpGraphDAGFileOpt;
 extern llvm::cl::opt<bool> debugMode;
+extern llvm::cl::opt<int> beamSizeOpt;
 
 
 struct Vocabulary {
@@ -76,6 +77,7 @@ struct Vocabulary {
 
 struct Model {
   unsigned batchSize_;
+  int beam_size;
   ExecutionContext context;
   ExecutionEngine EE_{ExecutionBackend};
   Function *F_;
@@ -92,7 +94,7 @@ struct Model {
   void loadDecoder();
   void translate(const std::vector<std::string> &batch);
 
-  Model(unsigned batchSize) : batchSize_(batchSize) {
+  Model(unsigned batchSize, int beamSize) : batchSize_(batchSize), beam_size(beamSize) {
     F_ = EE_.getModule().createFunction("main");
   }
 

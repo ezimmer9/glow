@@ -25,6 +25,10 @@ llvm::cl::alias batchSizeA("b", llvm::cl::desc("Alias for -batchsize"),
                            llvm::cl::aliasopt(batchSizeOpt),
                            llvm::cl::cat(en2grCat));
 
+llvm::cl::opt<int> beamSizeOpt(
+    "beamsize", llvm::cl::desc("beam size option"),
+    llvm::cl::init(1), llvm::cl::value_desc("N"), llvm::cl::cat(en2grCat));
+
 llvm::cl::opt<bool>
     timeOpt("time",
             llvm::cl::desc("Print timer data detailing how long it "
@@ -879,9 +883,15 @@ void Model::loadDecoder(){
 		// topk
 		auto *topK = F_->createTopK("decoder.topK", DecSM, 1);
 		//debug_size_print(topK);
-	    Node *lastWordIdx =
+		Node *lastWordIdx;
+		if (beam_size == 1){
+	    lastWordIdx =
 	        F_->createReshape("decoder.reshape", topK->getIndices(), {batchSize_});
 		//debug_size_print(lastWordIdx);
+		}
+		if (beam_size == 5){
+			continue;
+		}
 
 		if (word_inx+1 < MAX_LENGTH){
 			dec_seq[word_inx+1] = lastWordIdx;

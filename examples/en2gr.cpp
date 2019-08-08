@@ -18,7 +18,7 @@ int main(int argc, char **argv){
 	llvm::cl::HideUnrelatedOptions(showCategories);
 	llvm::cl::ParseCommandLineOptions(argc, argv, "Translate sentences from English to German");
 
-	Model seq2seq(batchSizeOpt);
+	Model seq2seq(batchSizeOpt, beamSizeOpt);
 	seq2seq.loadTokens();
 	seq2seq.loadEncoder();
 	seq2seq.loadDecoder();

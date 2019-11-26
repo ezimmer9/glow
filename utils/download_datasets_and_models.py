@@ -101,6 +101,12 @@ DATASETS = dict(
         untar,
         "fr2en",
     ),
+    en2gr=Dataset(
+        "en2gr.tar.gz",
+        "https://zenodo.org/record/3553484/files/en2gr.tar.gz",
+        untar,
+        ".",
+    ),
 )
 
 

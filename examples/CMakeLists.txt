@@ -56,8 +56,25 @@ target_link_libraries(fr2en
                         Support
                         LLVMSupport)
 
-add_executable(lenet-loader
-                 lenet-loader.cpp)
+add_executable(en2gr
+                 en2gr.cpp 
+                 en2gr-model/model.cpp 
+                 en2gr-model/lstm.cpp
+                 en2gr-model/en2gr_common.cpp
+                 en2gr-model/encoder.cpp
+                 en2gr-model/attention.cpp)
+target_link_libraries(en2gr
+                      PRIVATE
+                        Base
+                        ExecutionEngine
+                        IR
+                        GraphOptimizer
+                        Quantization
+                        Support
+                        LLVMSupport)
+
+add_executable(lenet-loader 
+					lenet-loader.cpp)
 target_link_libraries(lenet-loader
                       PRIVATE
                         ExecutionEngine

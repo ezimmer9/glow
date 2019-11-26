@@ -30,7 +30,7 @@ FunctionPassPipeline glow::createDefaultGraphOptimizationPassPipeline() {
 
       // Transposes that don't move data are optimized into Reshapes, which
       // enables further optimizations.
-      {FunctionPassID::OptimizeTransposeIntoReshape},
+      //{FunctionPassID::OptimizeTransposeIntoReshape},
 
       // Reshapes and transposes can prevent other optimizations from
       // triggering,
@@ -56,7 +56,7 @@ FunctionPassPipeline glow::createDefaultGraphOptimizationPassPipeline() {
       {FunctionPassID::MergePadIntoConvolution},
 
       // Merge multiple matmul nodes into a single large matmul.
-      {FunctionPassID::MergeMatMul},
+      //{FunctionPassID::MergeMatMul},
 
       // Merge multiple batched adds into a larger batched add.
       {FunctionPassID::MergeBatchedAdd},

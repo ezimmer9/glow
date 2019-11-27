@@ -1,12 +1,12 @@
 /*
- * attention.h
+ * decoder.h
  *
- *  Created on: Nov 14, 2019
+ *  Created on: Nov 26, 2019
  *      Author: ezimmer9
  */
 
-#ifndef EXAMPLES_EN2GR_MODEL_ATTENTION_H_
-#define EXAMPLES_EN2GR_MODEL_ATTENTION_H_
+#ifndef EXAMPLES_EN2GR_MODEL_DECODER_H_
+#define EXAMPLES_EN2GR_MODEL_DECODER_H_
 
 #include "glow/ExecutionEngine/ExecutionEngine.h"
 #include "glow/Optimizer/GraphOptimizer/GraphOptimizer.h"
@@ -30,38 +30,39 @@
 
 using namespace glow;
 
+class Model;
+class LSTM;
+class Attention;
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-class Model;
-
-class Attention{
-
+class Decoder {
 private:
 	uint m_batch_size , m_beam_size;
-	void init();
 
 public:
-	Attention(uint batch , uint beam , Model *model){
-		m_batch_size = batch;
-		m_beam_size = beam;
-		_model = model;
-		init();
+	Model *m_model;
+	Decoder(uint batch , uint beam , Model *model){
+		m_model = model; m_batch_size = batch; m_beam_size = beam;
 	}
-
-	Model *_model;
-	Placeholder *Wa , *Bwa , *Ua , *Bua , *Vt , *NormBias , *NormScalar , *SM;
-	AttentionParams attention_out;
-	AttentionParams loadAttention(Node *AttentionQuery);
+	void init();
 	uint get_batch_size(){
 		return m_batch_size;
 	}
 	uint get_beam_size(){
 		return m_beam_size;
 	}
-
+	std::shared_ptr<LSTM> decoderLayer0 , decoderLayer1 , decoderLayer2 , decoderLayer3;
+	std::shared_ptr<Attention> m_attention;
+	AttentionParams attention;
+	Placeholder *classifier_w ,*classifier_b;
+	Node* loadGreadyDecoder();
+	BeamDecoderOutput loadBeamDecoder();
+	void loadDecoderWieghts();
+	void loadDecoderBiases();
 };
 
 
@@ -69,6 +70,4 @@ public:
 } // extern "C"
 #endif
 
-
-
-#endif /* EXAMPLES_EN2GR_MODEL_ATTENTION_H_ */
+#endif /* EXAMPLES_EN2GR_MODEL_DECODER_H_ */

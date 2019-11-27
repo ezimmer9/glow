@@ -35,7 +35,7 @@ extern "C"
 {
 #endif
 
-struct Model;
+class Model;
 class Gate{
 
 private:

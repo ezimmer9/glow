@@ -55,6 +55,11 @@ struct AttentionParams{
   	NodeValue scores;
 };
 
+struct BeamDecoderOutput{
+	Node *candidates;
+	Node *scores;
+};
+
 struct metadata{
 
 	unsigned int offset;

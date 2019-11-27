@@ -27,8 +27,10 @@
 
 #include "en2gr_common.h"
 #include "lstm.h"
-#include "attention.h"
 #include "encoder.h"
+#include "decoder.h"
+#include "attention.h"
+
 
 using namespace glow;
 
@@ -63,8 +65,8 @@ extern llvm::cl::opt<std::string> inputOpt;
 extern llvm::cl::opt<std::string> file;
 
 class Encoder;
-class LSTM;
-class Attention;
+class Decoder;
+
 class Model {
 
 public:
@@ -88,11 +90,12 @@ public:
 	Model(unsigned batchSize, int beamSize, int maxLength) :
 		batchSize_(batchSize), beam_size(beamSize), max_length(maxLength) {
 		F_ = EE_.getModule().createFunction("main");
-		decoderLayer0 = std::make_shared<LSTM>(this); decoderLayer1 = std::make_shared<LSTM>(this);
-		decoderLayer2 = std::make_shared<LSTM>(this); decoderLayer3 = std::make_shared<LSTM>(this);
-		m_encoder = std::make_shared<Encoder>(batchSize , beamSize , this);
-		m_attention = std::make_shared<Attention>(batchSize , beamSize , this);
 		common_ = std::make_shared<En2grCommon>();
+		m_encoder = std::make_shared<Encoder>(batchSize , beamSize , this);
+		m_decoder = std::make_shared<Decoder>(batchSize , beamSize , this);
+	}
+	Placeholder *get_embedding_tok(){
+		return embedding_tok_;
 	}
 
 	void loadTokens();
@@ -103,16 +106,13 @@ public:
 	void dumpGraphDAG(const char *filename) { F_->dumpDAG(filename); }
 	void compile();
 
-	std::shared_ptr<Encoder> m_encoder;
-	std::shared_ptr<LSTM> decoderLayer0 , decoderLayer1 , decoderLayer2 , decoderLayer3;
 	std::shared_ptr<En2grCommon> common_;
-	std::shared_ptr<Attention> m_attention;
+	std::shared_ptr<Encoder> m_encoder;
+	std::shared_ptr<Decoder> m_decoder;
 
 private:
 	Placeholder *embedding_tok_;
 	Placeholder *loadEmbedding(llvm::StringRef langPrefix, size_t langSize);
-	void loadDecoderWieghts();
-	void loadDecoderBiases();
 };
 
 #ifdef __cplusplus

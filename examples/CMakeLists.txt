@@ -62,6 +62,7 @@ add_executable(en2gr
                  en2gr-model/lstm.cpp
                  en2gr-model/en2gr_common.cpp
                  en2gr-model/encoder.cpp
+                 en2gr-model/decoder.cpp
                  en2gr-model/attention.cpp)
 target_link_libraries(en2gr
                       PRIVATE

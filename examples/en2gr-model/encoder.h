@@ -30,7 +30,7 @@
 
 using namespace glow;
 
-struct Model;
+class Model;
 class LSTM;
 
 #ifdef __cplusplus

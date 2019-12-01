@@ -18,31 +18,31 @@ int main(int argc, char **argv){
 	llvm::cl::HideUnrelatedOptions(showCategories);
 	llvm::cl::ParseCommandLineOptions(argc, argv, "Translate sentences from English to German");
 
-	Model seq2seq(batchSizeOpt, beamSizeOpt, maxLengthOpt);
-	seq2seq.loadTokens();
-	seq2seq.loadEncoder();
+	Model gnmt(batchSizeOpt, beamSizeOpt, maxLengthOpt);
+	gnmt.loadTokens();
+	gnmt.loadEncoder();
 	if (beamSizeOpt == 1){
-		seq2seq.loadGreadyDecoder();
+		gnmt.loadGreadyDecoder();
 	}
 	else {
-		seq2seq.loadBeamDecoder();
+		gnmt.loadBeamDecoder();
 	}
-	seq2seq.compile();
+	gnmt.compile();
 
 	if (!dumpGraphDAGFileOpt.empty()) {
-	    seq2seq.dumpGraphDAG(dumpGraphDAGFileOpt.c_str());
+	    gnmt.dumpGraphDAG(dumpGraphDAGFileOpt.c_str());
 	}
 
 	if (debugMode){
 		std::vector<std::string> debug = {"They are"};
-		seq2seq.translate(debug);
+		gnmt.translate(debug);
 		return 0;
 
 	}
 
 	if (inputOpt != " "){
 		std::vector<std::string> vstrings = {inputOpt};
-		seq2seq.translate(vstrings);
+		gnmt.translate(vstrings);
 		return 0;
 	}
 
@@ -54,7 +54,7 @@ int main(int argc, char **argv){
 		while (std::getline(infile, temp_sentence)){
 			std::cout << temp_sentence.c_str() << "\n";
 			std::vector<std::string> vstrings = {temp_sentence};
-			seq2seq.translate(vstrings);
+			gnmt.translate(vstrings);
 		}
 		return 0;
 	}
@@ -71,7 +71,7 @@ int main(int argc, char **argv){
 	    	batch.push_back(sentence);
 	    }
 	    if (!batch.empty()) {
-	      seq2seq.translate(batch);
+	      gnmt.translate(batch);
 	    }
 	} while (batch.size() == batchSizeOpt);
 

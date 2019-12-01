@@ -101,8 +101,8 @@ void Encoder::loadEncoderWieghts(){
     {
 		for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
 		{
-			std::string const_name_h = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_wh1";
-			std::string const_name_x = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_wi1";
+			std::string const_name_h = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_wh__1";
+			std::string const_name_x = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_wi__1";
 			Constant *ConstH = mod->getConstantByName(const_name_h);
 			Constant *ConstX = mod->getConstantByName(const_name_x);
 			ConstVecH.push_back(ConstH);
@@ -129,8 +129,8 @@ void Encoder::loadEncoderBiases(){
     {
 		for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
 		{
-			std::string const_name_h_b = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_bh1";
-			std::string const_name_x_b = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_bi1";
+			std::string const_name_h_b = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_bh__1";
+			std::string const_name_x_b = "encoder_"+ std::to_string(j) +"_lstm_" + files_gates[i]+"_bi__1";
 			Constant *ConstHb = mod->getConstantByName(const_name_h_b);
 			Constant *ConstXb = mod->getConstantByName(const_name_x_b);
 			ConstVecHb.push_back(ConstHb);
@@ -153,8 +153,8 @@ void Encoder::loadEncoderReverse(){
 	std::vector<Constant *> ConstVecOppH, ConstVecOppX;
 	std::vector<Constant *> ConstVecOppHb, ConstVecOppXb;
 	for (uint i =0 ; i < LSTM_LEVELS ; i++){
-		std::string const_name_opp_h = "encoder_opp_lstm_" + files_gates[i] +"_wh1";
-		std::string const_name_opp_x = "encoder_opp_lstm_" + files_gates[i] +"_wi1";
+		std::string const_name_opp_h = "encoder_opp_lstm_" + files_gates[i] +"_wh__1";
+		std::string const_name_opp_x = "encoder_opp_lstm_" + files_gates[i] +"_wi__1";
 		Constant *ConstOppH = mod->getConstantByName(const_name_opp_h);
 		Constant *ConstOppX = mod->getConstantByName(const_name_opp_x);
 		ConstVecOppH.push_back(ConstOppH);
@@ -170,8 +170,8 @@ void Encoder::loadEncoderReverse(){
 	ConstVecOppX.clear();
 
 	for (uint i =0 ; i < LSTM_LEVELS ; i++){
-		std::string const_name_opp_h_b = "encoder_opp_lstm_" + files_gates[i] +"_bh1";
-		std::string const_name_opp_x_b = "encoder_opp_lstm_" + files_gates[i] +"_bi1";
+		std::string const_name_opp_h_b = "encoder_opp_lstm_" + files_gates[i] +"_bh__1";
+		std::string const_name_opp_x_b = "encoder_opp_lstm_" + files_gates[i] +"_bi__1";
 		Constant *ConstOppHb = mod->getConstantByName(const_name_opp_h_b);
 		Constant *ConstOppXb = mod->getConstantByName(const_name_opp_x_b);
 		ConstVecOppHb.push_back(ConstOppHb);

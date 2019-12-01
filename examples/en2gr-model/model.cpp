@@ -286,7 +286,8 @@ void Model::compile() {
 
 
     context.setTraceContext(llvm::make_unique<TraceContext>(TraceLevel::STANDARD));
-    EE_.compile(F_, cctx);
+    EE_.compile(cctx);
+    F_ = EE_.getModule().getFunctions().front();
 //    FunctionList debug = EE_.getModule().getFunctions();
 //    for (auto F : debug){
 //    	F->dump();

@@ -359,8 +359,8 @@ void Decoder::loadDecoderWieghts(){
     {
     	for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
     	{
-    		std::string const_name_h = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_wh1";
-    		std::string const_name_x = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_wi1";
+    		std::string const_name_h = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_wh__1";
+    		std::string const_name_x = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_wi__1";
     		Constant *ConstH = mod->getConstantByName(const_name_h);
     		Constant *ConstX = mod->getConstantByName(const_name_x);
     		ConstVecH.push_back(ConstH);
@@ -394,8 +394,8 @@ void Decoder::loadDecoderBiases(){
     {
     	for (uint i = 0 ; i < LSTM_LEVELS ; ++i)
     	{
-    		std::string const_name_h = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_bh1";
-    		std::string const_name_x = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_bi1";
+    		std::string const_name_h = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_bh__1";
+    		std::string const_name_x = "decoder_lstm_"+ std::to_string(j) +"_0_" + files_gates[i]+"_bi__1";
     		Constant *ConstH = mod->getConstantByName(const_name_h);
     		Constant *ConstX = mod->getConstantByName(const_name_x);
     		ConstVecH.push_back(ConstH);

@@ -30,7 +30,7 @@ FunctionPassPipeline glow::createDefaultGraphOptimizationPassPipeline() {
 
       // Transposes that don't move data are optimized into Reshapes, which
       // enables further optimizations.
-      //{FunctionPassID::OptimizeTransposeIntoReshape},
+      {FunctionPassID::OptimizeTransposeIntoReshape},
 
       // Reshapes and transposes can prevent other optimizations from
       // triggering,

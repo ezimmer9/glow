@@ -56,7 +56,7 @@ FunctionPassPipeline glow::createDefaultGraphOptimizationPassPipeline() {
       {FunctionPassID::MergePadIntoConvolution},
 
       // Merge multiple matmul nodes into a single large matmul.
-      //{FunctionPassID::MergeMatMul},
+      {FunctionPassID::MergeMatMul},
 
       // Merge multiple batched adds into a larger batched add.
       {FunctionPassID::MergeBatchedAdd},

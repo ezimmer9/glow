@@ -140,7 +140,7 @@ void Model::translate(const std::vector<std::string> &batch){
 	Tensor input(ElemKind::Int64ITy, {batchSize_, max_length});
 	Tensor attention_mask(ElemKind::FloatTy , {beam_size,max_length , 1});
 	input.zero();
-	size_t words_size;
+	size_t words_size = 0;
 
 	std::cout << "En: \n";
 	for (size_t j = 0; j < batch.size(); j++) {

@@ -56,17 +56,20 @@ void metadata::read_from_file(std::ifstream& file){
 	std::cout << "offset: " << offset << "\n";
 	size_t len;
 	file.read(reinterpret_cast<char*>(&len) , sizeof(len));
-	char *_name = new char [len];
+	char *_name = (char *)malloc(len);
+	assert(_name != NULL);
 	file.read(reinterpret_cast<char*>(_name) , len);
 	name = std::string(_name);
 	free(_name);
 	std::cout << "name: " << name.c_str() << "\n";
 	size_t len1;
 	file.read(reinterpret_cast<char*>(&len1) , sizeof(len1));
-	char * _type = new char [len1];
+	char * _type = (char *)malloc(len1);
+	assert(_type != NULL);
 	file.read(reinterpret_cast<char*>(_type) , len1);
 	type = std::string(_type);
-	free(_type);
+	if (_type != NULL)
+		free(_type);
 	std::cout << "type: " << type.c_str() << "\n";
 	size_t len2;
 	file.read(reinterpret_cast<char*>(&len2) , sizeof(len2));
